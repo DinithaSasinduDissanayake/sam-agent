@@ -180,7 +180,7 @@ def _validate_config(cfg: dict, cfg_path: Path) -> None:
 
     Raises ConfigCorrupt on mismatch.
     """
-    for keys, expected_type in REQUIRED_CONFIG_KEYS:
+    for keys, expected_type in REQUIRED_CONFIG_KEYS.items():
         value = cfg
         for key in keys:
             if not isinstance(value, dict) or key not in value:

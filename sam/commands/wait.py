@@ -40,7 +40,8 @@ def run(args):
         registry = sam_registry.load_registry()
         agents = registry.get("agents", [])
 
-        ref = getattr(args, "agent", None) or getattr(args, "name", None)
+        ref = (getattr(args, "id_or_name", None) or getattr(args, "name", None)
+              or getattr(args, "agent", None))
         if ref is None:
             return _emit_error(5, "agent identifier required", as_json)
 
@@ -59,7 +60,10 @@ def run(args):
 
         agent_id = agent["id"]
         start_time = time.monotonic()
-        timeout = getattr(args, "timeout", None)
+        timeout = getattr(args, "timeout", 300)
+        # --timeout 0 means wait forever
+        if timeout == 0:
+            timeout = None
 
         # Line 3: Poll loop
         while True:
@@ -78,7 +82,7 @@ def run(args):
                 break
 
             elapsed = time.monotonic() - start_time
-            if timeout and elapsed > timeout:
+            if timeout is not None and elapsed > timeout:
                 # Line 9: Timeout — kill the agent
                 try:
                     pgid = agent.get("pgid") or agent.get("pid")
@@ -153,14 +157,15 @@ def run(args):
                 print(f"Agent {agent_id} failed (exit {ec}, {elapsed}s)")
             return 1
 
-        # killed or unknown
+        # killed or unknown — exit 0 for ALL terminal states
+        # Parent agent reads JSON status field to differentiate
         out = {"status": current_state, "agent_id": agent_id,
                "result": result_dict, "elapsed_seconds": elapsed}
         if as_json:
             print(json.dumps(out))
         else:
             print(f"Agent {agent_id} {current_state} ({elapsed}s)")
-        return 3 if current_state == "killed" else 3
+        return 0
 
     except sam_locks.LockTimeout as e:
         return _emit_error(1, f"lock timeout: {e}", as_json)

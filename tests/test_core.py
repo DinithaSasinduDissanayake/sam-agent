@@ -345,3 +345,28 @@ class TestState:
         entry = {"state": "spawning", "pid": None}
         result = resolve_agent_state(entry, 1)
         assert result == "failed"
+
+
+class TestConfigValidation:
+    """Config validation tests (fix #4)."""
+
+    def test_config_missing_required_key_raises(self, sam_home):
+        """Config missing required key should raise ConfigCorrupt."""
+        import json
+        from sam.config import load_config, ConfigCorrupt
+        cfg_path = sam_home / "config.json"
+        cfg_path.write_text(json.dumps({"security": {"inherit_env": True}}))
+        with pytest.raises(ConfigCorrupt):
+            load_config(sam_home=sam_home)
+
+    def test_config_invalid_inherit_env_type(self, sam_home):
+        """Config with wrong type for inherit_env should raise ConfigCorrupt."""
+        import json
+        from sam.config import load_config, ConfigCorrupt
+        cfg_path = sam_home / "config.json"
+        cfg_path.write_text(json.dumps({
+            "defaults": {"model": "m", "max_restarts": 1, "max_depth": 4},
+            "security": {"inherit_env": "yes"},
+        }))
+        with pytest.raises(ConfigCorrupt):
+            load_config(sam_home=sam_home)

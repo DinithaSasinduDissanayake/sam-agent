@@ -34,7 +34,7 @@ def run(args):
     except Exception as e:
         return _emit_error(1, f"cannot load registry: {e}", as_json)
 
-    ref = getattr(args, "agent", None) or getattr(args, "name", None)
+    ref = getattr(args, "id_or_name", None) or getattr(args, "name", None)
 
     if ref:
         # Single agent mode

@@ -88,10 +88,12 @@ Block until an agent reaches a terminal state.
 sam wait <id-or-name> [--timeout <seconds>] [--json]
 ```
 
+| Flag | Description |
+|------|-------------|
+| `--timeout <seconds>` | Max wait time (default: 300, 0 = wait forever) |
+
 **Exit codes:**
-- 0 = completed (task succeeded)
-- 1 = failed (task finished with error)
-- 3 = killed (process terminated)
+- 0 = completed, failed, killed, or unknown (read JSON `status` field)
 - 4 = timeout (waited too long, agent was killed)
 - 5 = not found
 

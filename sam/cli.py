@@ -25,43 +25,51 @@ def main():
         sys.exit(1)
 
     # Line 2-3: Parser and global flags
+    # Use a shared parent parser so --json works before AND after the subcommand
     parser = argparse.ArgumentParser(prog="sam", description="Sub-Agent Manager")
     parser.add_argument("--json", action="store_true", help="JSON output mode")
     parser.add_argument("--sam-home", default=None, help="Override SAM_HOME path")
     parser.add_argument("--debug", action="store_true", help="Enable debug tracebacks")
 
+    # Shared parent parser with global flags for subcommands
+    base_parser = argparse.ArgumentParser(add_help=False)
+    base_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    base_parser.add_argument("--sam-home", default=None, help=argparse.SUPPRESS)
+    base_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+
     # Line 4: Subparsers
     sub = parser.add_subparsers(dest="command", required=True)
 
     # Line 5: init
-    p_init = sub.add_parser("init", help="Initialize SAM home directory")
+    p_init = sub.add_parser("init", parents=[base_parser], help="Initialize SAM home directory")
     p_init.add_argument("--force", action="store_true", help="Rewrite config if exists")
 
     # Line 6: spawn
-    p_spawn = sub.add_parser("spawn", help="Spawn a sub-agent")
+    p_spawn = sub.add_parser("spawn", parents=[base_parser], help="Spawn a sub-agent")
     p_spawn.add_argument("--name", required=True, help="Agent name")
     p_spawn.add_argument("--task", required=True, help="Path to task file")
     p_spawn.add_argument("--model", default=None, help="Model override")
     p_spawn.add_argument("--cwd", default=None, help="Working directory")
 
     # Line 7: status
-    p_status = sub.add_parser("status", help="Show agent state")
+    p_status = sub.add_parser("status", parents=[base_parser], help="Show agent state")
     p_status.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_status.add_argument("--name", default=None, help="Agent name (alternative)")
 
     # Line 8: kill
-    p_kill = sub.add_parser("kill", help="Kill a running agent")
+    p_kill = sub.add_parser("kill", parents=[base_parser], help="Kill a running agent")
     p_kill.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_kill.add_argument("--name", default=None, help="Agent name (alternative)")
 
     # Line 9: wait
-    p_wait = sub.add_parser("wait", help="Wait for agent completion")
+    p_wait = sub.add_parser("wait", parents=[base_parser], help="Wait for agent completion")
     p_wait.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_wait.add_argument("--name", default=None, help="Agent name (alternative)")
-    p_wait.add_argument("--timeout", type=int, default=None, help="Max wait time in seconds")
+    p_wait.add_argument("--timeout", type=int, default=300,
+                        help="Max wait time in seconds (default 300, 0 = wait forever)")
 
     # Line 10: logs
-    p_logs = sub.add_parser("logs", help="Show agent logs")
+    p_logs = sub.add_parser("logs", parents=[base_parser], help="Show agent logs")
     p_logs.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_logs.add_argument("--name", default=None, help="Agent name (alternative)")
     p_logs.add_argument("-n", type=int, default=50, help="Number of tail lines")

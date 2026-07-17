@@ -42,7 +42,7 @@ def run(args):
         registry = sam_registry.load_registry()
         agents = registry.get("agents", [])
 
-        ref = getattr(args, "agent", None) or getattr(args, "name", None)
+        ref = getattr(args, "id_or_name", None) or getattr(args, "name", None)
         if ref is None:
             return _emit_error(3, "agent identifier required", as_json)
 

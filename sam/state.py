@@ -24,7 +24,8 @@ def resolve_agent_state(
     run_id,
     proc_alive_fn=sam_proc.proc_alive,
     read_start_time_fn=sam_proc.read_pid_start_time,
-    read_result_fn=None,
+    read_result_fn=None,  # will use _read_result_file if None
+    _read_result_helper=None,
 ):
     """Compute the true state of an agent from registry + /proc + result.json.
 
@@ -69,29 +70,35 @@ def resolve_agent_state(
     # Line 9: alive = proc_alive_fn(pid)
     alive = proc_alive_fn(pid)
 
-    # Line 10: If alive
+    # Check result.json FIRST — it is the authoritative completion marker
+    # If result.json exists with valid final_state_hint, trust it over PID state
+    # (PID may be recycled immediately after process exits, causing false "unknown")
+    result = _read_result(agent_entry, read_result_fn)
+    if result is not None and isinstance(result, dict):
+        hint = result.get("final_state_hint")
+        if hint == "completed":
+            return "completed"
+        if hint == "failed":
+            return "failed"
+
+    # Line 10-14: PID-based checks (only if result.json didn't give us the answer)
     if alive:
-        # Line 11: current_start = read_start_time_fn(pid)
         current_start = read_start_time_fn(pid)
-        # Line 12: stored_start = agent_entry.get("pid_start_time")
         stored_start = agent_entry.get("pid_start_time")
-        # Line 13: if match → running
         if current_start is not None and current_start == stored_start:
             return "running"
-        # Line 14: else → unknown
         return "unknown"
 
-    # Line 15: PID is dead
-    # Line 16: result = read_result_fn(agent_entry.get("result_path"))
-    result = None
-    result_path = agent_entry.get("result_path")
-    if result_path is not None and read_result_fn is not None:
-        result = read_result_fn(result_path)
+    # Line 15: PID is dead — check result.json (already checked above, but
+    # recheck for the dead-PID-specific rules)
+    result = _read_result(agent_entry, read_result_fn)
 
-    # Line 17: If result is valid and run_id matches
-    if result is not None and isinstance(result, dict) and result.get("run_id") == run_id:
-        # Line 18: hint = result.get("final_state_hint")
+    # Line 17: If result exists with valid final_state_hint
+    if result is not None and isinstance(result, dict):
         hint = result.get("final_state_hint")
+        if hint in ("completed", "failed"):
+            return hint
+        # Line 21: invalid hint → failed
         # Line 19: if hint == "completed" → completed
         if hint == "completed":
             return "completed"
@@ -118,3 +125,24 @@ def _parse_iso(iso_str):
     if iso_str.endswith("Z"):
         iso_str = iso_str[:-1] + "+00:00"
     return datetime.fromisoformat(iso_str)
+
+
+def _read_result_file(result_path):
+    """Default result reader: read and parse result.json."""
+    import json
+    try:
+        if result_path and __import__('os').path.exists(result_path):
+            with open(result_path) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _read_result(agent_entry, read_result_fn):
+    """Read result.json from agent entry. Returns dict or None."""
+    result_path = agent_entry.get("result_path")
+    if result_path is not None:
+        reader = read_result_fn if read_result_fn is not None else _read_result_file
+        return reader(result_path)
+    return None
