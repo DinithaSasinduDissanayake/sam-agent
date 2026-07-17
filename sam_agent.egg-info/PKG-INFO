@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: sam-agent
+Version: 0.1.0
+Summary: Sub-Agent Manager — spawn, track, kill, and restart background AI sub-agents
+Author: Dinitha Sasindu Dissanayake
+License: MIT
+Project-URL: Homepage, https://github.com/DinithaSasinduDissanayake/pi-claw
+Project-URL: Repository, https://github.com/DinithaSasinduDissanayake/pi-claw
+Keywords: ai,agent,cli,sub-agent,process-manager
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Software Development :: Build Tools
+Classifier: Topic :: System :: Process Management
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-timeout>=2.0; extra == "dev"

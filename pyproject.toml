@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam-agent"
+version = "0.1.0"
+description = "Sub-Agent Manager — spawn, track, kill, and restart background AI sub-agents"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Dinitha Sasindu Dissanayake"},
+]
+keywords = ["ai", "agent", "cli", "sub-agent", "process-manager"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Process Management",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.0",
+]
+
+[project.scripts]
+sam = "sam.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/DinithaSasinduDissanayake/pi-claw"
+Repository = "https://github.com/DinithaSasinduDissanayake/pi-claw"
+
+[tool.setuptools.packages.find]
+include = ["sam*"]
+exclude = ["tests*", "wrapper*"]
+
+[tool.setuptools.package-data]
+sam = ["../wrapper/pi_wrapper.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that exercise multiple modules together",
+    "e2e: end-to-end CLI subprocess tests",
+    "slow: tests that take >10 seconds",
+    "real_pi: tests requiring a real pi binary (not fake_pi)",
+]
+timeout = 60
+addopts = "-v --tb=short"
