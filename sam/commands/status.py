@@ -34,6 +34,9 @@ def run(args):
     except Exception as e:
         return _emit_error(1, f"cannot load registry: {e}", as_json)
 
+    # v0.1.1: --all flag shows terminal agents too; default hides them
+    show_all = getattr(args, "all", False)
+
     ref = getattr(args, "id_or_name", None) or getattr(args, "name", None)
 
     if ref:
@@ -79,6 +82,12 @@ def run(args):
         return 0
 
     # List mode
+    # v0.1.1: filter to active (non-terminal) by default unless --all
+    from sam import state as sam_state
+    if not show_all:
+        agents = [a for a in agents
+                  if a.get("state") not in sam_state.TERMINAL_STATES]
+
     resolved_list = []
     for a in agents:
         try:

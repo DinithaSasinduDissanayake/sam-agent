@@ -122,6 +122,23 @@ def run(args):
         parent_id = os.environ.get("SAM_AGENT_ID")
         root_id = os.environ.get("SAM_ROOT_ID")
 
+        # v0.1.1: concurrency warning — check how many running agents share this model
+        try:
+            reg = sam_registry.load_registry()
+            same_model = sum(
+                1 for a in reg.get("agents", [])
+                if a.get("model") == model
+                and a.get("state") in ("spawning", "running")
+            )
+            if same_model >= 3:
+                print(
+                    f"Warning: {same_model} agents already running with model "
+                    f"{model}. Rate limits may occur.",
+                    file=sys.stderr,
+                )
+        except Exception:
+            pass  # Best-effort warning only
+
         # 1-15: Lock sequence
         try:
             with sam_locks.name_lock(name, timeout=10):

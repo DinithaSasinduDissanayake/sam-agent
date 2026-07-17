@@ -42,6 +42,7 @@ def main():
     p_status = sub.add_parser("status", parents=[base_parser], help="Show agent state")
     p_status.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_status.add_argument("--name", default=None, help="Agent name (alternative)")
+    p_status.add_argument("--all", action="store_true", help="Show all agents including terminal")
 
     p_kill = sub.add_parser("kill", parents=[base_parser], help="Kill a running agent")
     p_kill.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
@@ -63,6 +64,12 @@ def main():
     p_restart = sub.add_parser("restart", parents=[base_parser], help="Restart a terminal agent")
     p_restart.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_restart.add_argument("--name", default=None, help="Agent name (alternative)")
+
+    # v0.1.1: skill — print SKILL.md for AI agents
+    p_skill = sub.add_parser("skill", parents=[base_parser], help="Print SKILL.md for AI agents")
+
+    # v0.1.1: prune — remove terminal agents
+    p_prune = sub.add_parser("prune", parents=[base_parser], help="Remove terminal agents from registry")
 
     # Parse everything at once — argparse handles help natively
     args = parser.parse_args()
@@ -89,6 +96,18 @@ def main():
             from sam.commands.logs import run as cmd_run
         elif cmd == "restart":
             from sam.commands.restart import run as cmd_run
+        elif cmd == "skill":
+            # Read SKILL.md from package or filesystem and print to stdout
+            import pkgutil
+            data = pkgutil.get_data(__package__ or "sam", "../SKILL.md")
+            if data is None:
+                import pathlib
+                skill_path = pathlib.Path(__file__).resolve().parent.parent / "SKILL.md"
+                data = skill_path.read_bytes()
+            sys.stdout.buffer.write(data)
+            sys.exit(0)
+        elif cmd == "prune":
+            from sam.commands.prune import run as cmd_run
         else:
             print(f"sam: unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)
