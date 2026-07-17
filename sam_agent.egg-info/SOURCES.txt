@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 sam/__init__.py
 sam/__main__.py

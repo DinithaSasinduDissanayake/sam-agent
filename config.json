@@ -1,0 +1,10 @@
+{
+  "defaults": {
+    "model": "opencode/deepseek-v4-flash-free",
+    "max_restarts": 1,
+    "max_depth": 4
+  },
+  "security": {
+    "inherit_env": true
+  }
+}
