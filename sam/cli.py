@@ -25,22 +25,52 @@ def main():
         sys.exit(1)
 
     # Line 2-3: Parser and global flags
-    # Use a shared parent parser so --json works before AND after the subcommand
-    parser = argparse.ArgumentParser(prog="sam", description="Sub-Agent Manager")
-    parser.add_argument("--json", action="store_true", help="JSON output mode")
-    parser.add_argument("--sam-home", default=None, help="Override SAM_HOME path")
-    parser.add_argument("--debug", action="store_true", help="Enable debug tracebacks")
+    # Use a two-pass approach:
+    #   1. Parse global options BEFORE the subcommand using parse_known_args.
+    #      This handles: sam --sam-home /tmp/test --json status <args>
+    #   2. Subcommand parsers also define --json, --sam-home, --debug so they
+    #      work AFTER the subcommand: sam status --json
+    # The global values are applied first; subcommand values override if different.
 
-    # Shared parent parser with global flags for subcommands
+    # Stage 1: Global parser (handles flags before the subcommand)
+    parser = argparse.ArgumentParser(prog="sam", description="Sub-Agent Manager",
+                                     add_help=False)
+    parser.add_argument("--json", action="store_true", default=None,
+                        help="JSON output mode")
+    parser.add_argument("--sam-home", default=None,
+                        help="Override SAM_HOME path")
+    parser.add_argument("--debug", action="store_true", default=None,
+                        help="Enable debug tracebacks")
+    parser.add_argument("-h", "--help", action="store_true", default=None,
+                        help="Show help and exit")
+
+    # Parse known global args, leaving the rest for subcommand parsing
+    global_args, remaining = parser.parse_known_args()
+
+    # Apply global --sam-home immediately so subcommands can use sam.config
+    if global_args.sam_home:
+        os.environ["SAM_HOME"] = global_args.sam_home
+    if global_args.debug:
+        os.environ["SAM_DEBUG"] = "1"
+
+    # Stage 2: Subcommand parser (handles flags after the subcommand)
+    # All subcommands inherit --json, --sam-home, --debug via base_parser
+    sub_parser = argparse.ArgumentParser(prog="sam", add_help=True)
     base_parser = argparse.ArgumentParser(add_help=False)
-    base_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    base_parser.add_argument("--json", action="store_true", default=None,
+                             help=argparse.SUPPRESS)
     base_parser.add_argument("--sam-home", default=None, help=argparse.SUPPRESS)
-    base_parser.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
+    base_parser.add_argument("--debug", action="store_true", default=None,
+                             help=argparse.SUPPRESS)
 
-    # Line 4: Subparsers
-    sub = parser.add_subparsers(dest="command", required=True)
+    # If --help was requested globally (before subcommand), show main help
+    if global_args.help and not remaining:
+        sub_parser.print_help()
+        sys.exit(0)
 
-    # Line 5: init
+    sub = sub_parser.add_subparsers(dest="command", required=True)
+
+    # Line 5-11: Add subcommands with parents=[base_parser]
     p_init = sub.add_parser("init", parents=[base_parser], help="Initialize SAM home directory")
     p_init.add_argument("--force", action="store_true", help="Rewrite config if exists")
 
@@ -77,23 +107,34 @@ def main():
     p_logs.add_argument("--raw", action="store_true", help="Show sentinel markers")
 
     # Line 11: restart
-    p_restart = sub.add_parser("restart", help="Restart a terminal agent")
+    p_restart = sub.add_parser("restart", parents=[base_parser], help="Restart a terminal agent")
     p_restart.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_restart.add_argument("--name", default=None, help="Agent name (alternative)")
 
-    # Line 12: Parse
+    # Line 12: Parse remaining args with subcommand parser
     try:
-        args = parser.parse_args()
+        args = sub_parser.parse_args(remaining)
     except SystemExit:
         raise  # Let argparse handle usage errors (exit 2)
 
-    # Line 13: Apply --sam-home if provided
-    if args.sam_home:
+    # Merge global args into parsed args (subcommand values take priority)
+    if global_args.json is not None and getattr(args, "json", None) is None:
+        args.json = global_args.json
+    if global_args.sam_home and not getattr(args, "sam_home", None):
+        args.sam_home = global_args.sam_home
         os.environ["SAM_HOME"] = args.sam_home
+    if global_args.debug and not getattr(args, "debug", None):
+        args.debug = global_args.debug
 
     # Line 14-18: Lazy dispatch
     try:
         cmd = args.command
+
+        # Ensure --json flag defaults to False for commands that check it
+        if not hasattr(args, "json") or args.json is None:
+            args.json = False
+        if not hasattr(args, "debug") or args.debug is None:
+            args.debug = False
 
         if cmd == "init":
             from sam.commands.init_cmd import run as cmd_run
