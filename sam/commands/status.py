@@ -83,7 +83,7 @@ def run(args):
 
     # List mode
     # v0.1.1: filter to active (non-terminal) by default unless --all
-    from sam import state as sam_state
+        pass
     if not show_all:
         agents = [a for a in agents
                   if a.get("state") not in sam_state.TERMINAL_STATES]

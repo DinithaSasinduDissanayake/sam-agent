@@ -126,7 +126,7 @@ def main():
         sys.exit(0)
 
     except Exception as e:
-        is_json = args.json
+        is_json = getattr(args, "json", False)
         is_debug = args.debug or os.environ.get("SAM_DEBUG")
 
         if is_debug:
