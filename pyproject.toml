@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sam-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Sub-Agent Manager — spawn, track, kill, and restart background AI sub-agents"
 readme = "README.md"
 license = {text = "MIT"}
