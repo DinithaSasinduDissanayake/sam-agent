@@ -16,6 +16,7 @@ sam/commands/kill.py
 sam/commands/logs.py
 sam/commands/prune.py
 sam/commands/restart.py
+sam/commands/resume.py
 sam/commands/spawn.py
 sam/commands/status.py
 sam/commands/wait.py

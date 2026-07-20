@@ -61,13 +61,19 @@ def main():
 
     # Line 5-6: Verify paths are inside same run directory (security)
     run_dir = os.path.normpath(result_dir)
-    for path_name, path_value in [("result", args.result), ("session", args.session),
-                                    ("log", log_path)]:
+    for path_name, path_value in [("result", args.result), ("log", log_path)]:
         resolved = os.path.normpath(os.path.dirname(path_value))
-        if not resolved.startswith(run_dir):
+        if not resolved.startswith(run_dir + "/") and resolved != run_dir:
             print(f"pi-wrapper: security violation — {path_name} path outside run dir",
                   file=sys.stderr)
             sys.exit(1)
+    # Session path may be at agent root (above run dir) — allow it
+    agent_root = os.path.normpath(os.path.dirname(run_dir))
+    session_resolved = os.path.normpath(os.path.dirname(args.session))
+    if not session_resolved.startswith(agent_root + "/") and session_resolved != agent_root:
+        print("pi-wrapper: security violation — session path outside agent dir",
+              file=sys.stderr)
+        sys.exit(1)
 
     # Line 7: Generate sentinel
     sentinel = secrets.token_hex(4)  # 8 hex chars

@@ -71,6 +71,13 @@ def main():
     # v0.1.1: prune — remove terminal agents
     p_prune = sub.add_parser("prune", parents=[base_parser], help="Remove terminal agents from registry")
 
+    # v0.1.2: resume — continue agent session with new task
+    p_resume = sub.add_parser("resume", parents=[base_parser], help="Resume terminal agent with new task")
+    p_resume.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
+    p_resume.add_argument("--name", default=None, help="Agent name (alternative)")
+    p_resume.add_argument("--task", required=True, help="Path to new task file")
+    p_resume.add_argument("--model", default=None, help="Model override")
+
     # Parse everything at once — argparse handles help natively
     args = parser.parse_args()
 
@@ -108,6 +115,8 @@ def main():
             sys.exit(0)
         elif cmd == "prune":
             from sam.commands.prune import run as cmd_run
+        elif cmd == "resume":
+            from sam.commands.resume import run as cmd_run
         else:
             print(f"sam: unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)

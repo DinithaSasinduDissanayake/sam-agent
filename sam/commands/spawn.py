@@ -102,7 +102,7 @@ def allocate_paths(paths, agent_id, run_id):
         "run_dir": str(run_dir),
         "log_path": str(run_dir / "output.log"),
         "result_path": str(run_dir / "result.json"),
-        "session_path": str(run_dir / "session.jsonl"),
+        "session_path": str(agent_dir / "session.jsonl"),
         "task_path": str(Path(paths["tasks"]) / f"{agent_id}.md"),
     }
 
