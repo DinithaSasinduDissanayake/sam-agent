@@ -15,7 +15,7 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "defaults": {
         "model": "opencode/deepseek-v4-flash-free",
-        "max_restarts": 1,
+        "max_restarts": 5,
         "max_depth": 4,
     },
     "security": {
