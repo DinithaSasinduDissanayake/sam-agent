@@ -6,6 +6,7 @@ Spec: reviews-line-by-line.md — GLM-5.2, File: sam/proc.py
 
 import os
 import signal
+import time
 
 
 def proc_alive(pid):

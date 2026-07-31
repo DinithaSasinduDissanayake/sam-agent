@@ -56,12 +56,13 @@ sam logs worker -n 50
 | Command | Purpose |
 |---------|---------|
 | `init` | Initialize SAM home directory |
-| `spawn` | Spawn a sub-agent |
+| `spawn` | Spawn a sub-agent (accepts `--model`, `--thinking <level>`) |
 | `status` | Show agent state |
 | `kill` | Kill a running agent |
 | `wait` | Wait for agent completion |
 | `logs` | Show agent logs |
 | `restart` | Restart a terminal agent |
+| `resume` | Continue agent session with new task (accepts `--model`, `--thinking <level>`) |
 
 All commands accept `--json` for machine-readable output and `--sam-home <path>` to override the data directory.
 

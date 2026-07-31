@@ -141,6 +141,9 @@ def run(args):
             "--task", str(sam_task_path),
             "--result", agent["result_path"],
         ]
+        thinking = getattr(args, "thinking", None)
+        if thinking:
+            argv.extend(["--thinking", thinking])
 
         parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
         env = sam_util.build_child_env(agent_id, model, parent_depth)

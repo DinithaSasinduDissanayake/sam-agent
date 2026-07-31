@@ -219,6 +219,9 @@ def run(args):
                 "--task", paths["task_path"],
                 "--result", paths["result_path"],
             ]
+            thinking = getattr(args, "thinking", None)
+            if thinking:
+                argv.extend(["--thinking", thinking])
 
             env = build_child_env(agent_id, model, depth)
             proc = subprocess.Popen(

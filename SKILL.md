@@ -65,6 +65,7 @@ sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>]
 | `--task` | Yes | Path to task markdown file |
 | `--cwd` | No | Working directory (default: task file's parent directory) |
 | `--model` | No | Model to use (default: from config or SAM_MODEL env) |
+| `--thinking` | No | Thinking/reasoning level for model (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 
 **Output:** Agent ID like `sam-20260716-103042-a1b2c3`.
 

@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--session", required=True)
     parser.add_argument("--task", required=True)
     parser.add_argument("--result", required=True)
+    parser.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"])
     args = parser.parse_args()
 
     # Line 3: Validate task file exists
@@ -108,8 +109,10 @@ def main():
                 "--print",
                 "--model", args.model,
                 "--session", args.session,
-                f"@{args.task}",
             ]
+            if args.thinking:
+                pi_argv.extend(["--thinking", args.thinking])
+            pi_argv.append(f"@{args.task}")
 
             try:
                 child = subprocess.Popen(

@@ -37,6 +37,8 @@ def main():
     p_spawn.add_argument("--name", required=True, help="Agent name")
     p_spawn.add_argument("--task", required=True, help="Path to task file")
     p_spawn.add_argument("--model", default=None, help="Model override")
+    p_spawn.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+                         help="Thinking/reasoning level for model (off, minimal, low, medium, high, xhigh, max)")
     p_spawn.add_argument("--cwd", default=None, help="Working directory")
 
     p_status = sub.add_parser("status", parents=[base_parser], help="Show agent state")
@@ -77,6 +79,8 @@ def main():
     p_resume.add_argument("--name", default=None, help="Agent name (alternative)")
     p_resume.add_argument("--task", required=True, help="Path to new task file")
     p_resume.add_argument("--model", default=None, help="Model override")
+    p_resume.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+                         help="Thinking/reasoning level override for model")
 
     # Parse everything at once — argparse handles help natively
     args = parser.parse_args()
