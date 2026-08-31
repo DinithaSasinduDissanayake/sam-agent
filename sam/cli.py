@@ -45,6 +45,13 @@ def main():
     p_status.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_status.add_argument("--name", default=None, help="Agent name (alternative)")
     p_status.add_argument("--all", action="store_true", help="Show all agents including terminal")
+    p_status.add_argument("--detail", action="store_true",
+                          help="Show detailed activity signals (read-only, opt-in)")
+    p_status.add_argument("--watch", nargs="?", const=5, type=int, default=None,
+                          metavar="SECONDS",
+                          help="Two-sample byte deltas over SECONDS (1-30, default 5); implies --detail")
+    p_status.add_argument("--stall-seconds", type=int, default=300,
+                          help="Seconds before a verified-live agent is possibly_stalled (default 300)")
 
     p_kill = sub.add_parser("kill", parents=[base_parser], help="Kill a running agent")
     p_kill.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
