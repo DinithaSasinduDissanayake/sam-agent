@@ -39,8 +39,8 @@ dev = [
 sam = "sam.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/DinithaSasinduDissanayake/pi-claw"
-Repository = "https://github.com/DinithaSasinduDissanayake/pi-claw"
+Homepage = "https://github.com/DinithaSasinduDissanayake/sam-agent"
+Repository = "https://github.com/DinithaSasinduDissanayake/sam-agent"
 
 [tool.setuptools.packages.find]
 include = ["sam*"]
