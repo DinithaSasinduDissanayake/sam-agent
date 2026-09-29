@@ -52,6 +52,11 @@ def load_registry():
     if not isinstance(data["agents"], list):
         raise RegistryCorrupt("Registry agents must be a list")
 
+    # Step 4: normalize archived flag (default false for pre-existing entries)
+    for agent in data["agents"]:
+        if isinstance(agent, dict):
+            agent.setdefault("archived", False)
+
     return data
 
 
@@ -168,6 +173,7 @@ def create_entry(fields):
         "exit_signal": None,
         "duration_ms": None,
         "killed_reason": None,
+        "archived": False,
     }
     entry = dict(defaults)
     entry.update(fields)

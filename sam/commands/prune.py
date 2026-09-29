@@ -1,101 +1,124 @@
 #!/usr/bin/env python3
-"""SAM prune — Remove terminal agents (completed/failed/killed) from registry.
+"""SAM prune — Hide terminal agents (completed/failed/killed) via archived flag.
 
-v0.1.1: Deletes agent directories and registry entries for terminal agents.
+Step 4: prune never deletes. Sets archived=true on registry entries;
+never rmtree, never removes registry entries. Directories, logs and
+results remain intact so `sam status --all`, `sam logs` and
+`sam result` still work on archived agents.
+Usage: sam prune [id|--all]  (no args = all terminal)
 """
 
 import json
-import shutil
 import sys
-from pathlib import Path
+from datetime import datetime, timezone
 
-from sam import config as sam_config
 from sam import locks as sam_locks
 from sam import registry as sam_registry
+from sam import state as sam_state
+
+
+def _emit(msg, as_json, is_error=False):
+    if as_json:
+        print(json.dumps(msg), file=sys.stderr if is_error else sys.stdout)
+    else:
+        print(msg.get("message", msg) if isinstance(msg, dict) else msg,
+              file=sys.stderr if is_error else sys.stdout)
 
 
 def run(args):
-    """Prune terminal agents from registry and delete their directories.
-
-    Removes all agents with state in (completed, failed, killed).
-    Active agents (spawning, running) are preserved.
-    """
     as_json = getattr(args, "json", False)
+    ref = getattr(args, "id", None)
+    prune_all = getattr(args, "all", False)
+
+    if ref and prune_all:
+        msg = "cannot specify both ID and --all"
+        if as_json:
+            print(json.dumps({"status": "error", "code": 2, "message": msg}), file=sys.stderr)
+        else:
+            print(f"sam: {msg}", file=sys.stderr)
+        return 2
 
     try:
-        config = sam_config.load_config()
-        reg = sam_registry.load_registry()
-        agents = reg.get("agents", [])
-
-        terminal_states = {"completed", "failed", "killed"}
-        active = []
-        pruned = []
-
-        for agent in agents:
-            if agent.get("state") in terminal_states:
-                pruned.append(agent)
-            else:
-                active.append(agent)
-
-        if not pruned:
-            if as_json:
-                print(json.dumps({"status": "ok", "pruned": 0}))
-            else:
-                print("No terminal agents to prune")
-            return 0
-
-        # Delete agent directories (best-effort)
-        deleted_dirs = 0
-        for agent in pruned:
-            log_path = agent.get("log_path", "")
-            if log_path:
-                # Agent dir is: agents/<id>/run-NNN/
-                agent_run_dir = Path(log_path).parent
-                agent_dir = agent_run_dir.parent
-                if agent_dir.exists():
-                    try:
-                        shutil.rmtree(agent_dir)
-                        deleted_dirs += 1
-                    except Exception as e:
-                        print(f"Warning: could not delete {agent_dir}: {e}",
-                              file=sys.stderr)
-
-        # Acquire lock and update registry
         with sam_locks.registry_lock(exclusive=True, timeout=10):
             reg = sam_registry.load_registry()
-            # Re-filter (registry may have changed while we were deleting dirs)
             agents = reg.get("agents", [])
-            active = [a for a in agents if a.get("state") not in terminal_states]
-            reg["agents"] = active
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if ref:
+                agent = sam_registry.find_by_id(agents, ref)
+                if agent is None:
+                    matches = [a for a in agents if a.get("name") == ref]
+                    agent = matches[0] if len(matches) == 1 else None
+                    if agent is None and len(matches) > 1:
+                        raise RuntimeError(f"ambiguous name '{ref}'")
+                if agent is None:
+                    raise RuntimeError(f"agent not found: {ref}")
+                resolved = sam_state.resolve_agent_state(agent, agent.get("run_id", 1))
+                if resolved not in sam_state.TERMINAL_STATES:
+                    raise RuntimeError(f"agent {agent['id']} is not terminal (state={resolved})")
+                if agent.get("archived"):
+                    if as_json:
+                        print(json.dumps({"status": "ok", "pruned": 0, "agent_id": agent["id"],
+                                          "message": "already archived"}))
+                    else:
+                        print(f"Agent {agent['id']} already archived")
+                    return 0
+                agent["archived"] = True
+                agent["updated_at"] = now
+                sam_registry.save_registry(reg)
+                if as_json:
+                    print(json.dumps({"status": "ok", "pruned": 1, "agent_id": agent["id"]}))
+                else:
+                    print(f"Archived agent {agent['id']}")
+                return 0
+
+            # --all or no args: archive all terminal, non-archived agents
+            targets = []
+            for a in agents:
+                if a.get("archived"):
+                    continue
+                try:
+                    resolved = sam_state.resolve_agent_state(a, a.get("run_id", 1))
+                except Exception:
+                    resolved = a.get("state")
+                if resolved in sam_state.TERMINAL_STATES:
+                    targets.append(a)
+            if not targets:
+                if as_json:
+                    print(json.dumps({"status": "ok", "pruned": 0}))
+                else:
+                    print("No terminal agents to prune")
+                return 0
+            for a in targets:
+                a["archived"] = True
+                a["updated_at"] = now
             sam_registry.save_registry(reg)
-
-        result = {
-            "status": "ok",
-            "pruned": len(pruned),
-            "directories_deleted": deleted_dirs,
-        }
-        if as_json:
-            print(json.dumps(result))
-        else:
-            print(f"Pruned {len(pruned)} terminal agents")
-            if deleted_dirs:
-                print(f"Deleted {deleted_dirs} agent directories")
-
-        return 0
+            if as_json:
+                print(json.dumps({"status": "ok", "pruned": len(targets),
+                                  "agent_ids": [a.get("id") for a in targets]}))
+            else:
+                print(f"Archived {len(targets)} terminal agents")
+            return 0
 
     except sam_locks.LockTimeout as e:
         msg = f"lock timeout: {e}"
         if as_json:
-            print(json.dumps({"status": "error", "code": 1, "message": msg}),
-                  file=sys.stderr)
+            print(json.dumps({"status": "error", "code": 1, "message": msg}), file=sys.stderr)
         else:
             print(f"sam: {msg}", file=sys.stderr)
         return 1
+    except RuntimeError as e:
+        msg = str(e)
+        code = 3 if "not found" in msg else 2 if "ambiguous" in msg or "both" in msg else 6 if "not terminal" in msg else 1
+        if as_json:
+            print(json.dumps({"status": "error", "code": code, "message": msg}), file=sys.stderr)
+        else:
+            print(f"sam: {msg}", file=sys.stderr)
+        return code
     except Exception as e:
         msg = str(e)
         if as_json:
-            print(json.dumps({"status": "error", "code": 1, "message": msg}),
-                  file=sys.stderr)
+            print(json.dumps({"status": "error", "code": 1, "message": msg}), file=sys.stderr)
         else:
             print(f"sam: {msg}", file=sys.stderr)
         return 1
