@@ -102,9 +102,13 @@ def _extract_conversation_id(raw, strict=False):
 def _extract_agy_result(raw):
     """Best-effort: stdout JSON envelope `response`, else stream-json last `result`.
 
-    Checks whole-output JSON first, then JSON-lines in reverse (last wins).
-    A stream-json event {"type": "result", ...} yields its result/response/
-    text field. Returns str, or None when absent/unparseable.
+    The real agy envelope is a single JSON object wrapped in
+    ##AGY_BEGIN_/##AGY_END_ sentinel lines, e.g.
+    {"conversation_id": "...", "status": "SUCCESS", "response": "..."}.
+    Sentinels are stripped before parsing so the whole-output parse
+    succeeds on the real shape; falls back to JSON-lines in reverse
+    (last wins). A stream-json event {"type": "result", ...} yields its
+    result/response/text field. Returns str, or None when absent/unparseable.
     """
     if not raw:
         return None
@@ -124,13 +128,19 @@ def _extract_agy_result(raw):
             return v
         return None
 
+    # Strip wrapper sentinel lines so the whole-output parse sees the
+    # real envelope shape (sentinels otherwise break json.loads).
+    lines = [ln for ln in text.splitlines()
+             if not (ln.startswith("##AGY_BEGIN_")
+                     or ln.startswith("##AGY_END_"))]
+    stripped = "\n".join(lines)
     try:
-        found = from_obj(json.loads(text))
+        found = from_obj(json.loads(stripped))
         if found is not None:
             return found
     except (ValueError, TypeError):
         pass
-    for line in reversed(text.splitlines()):
+    for line in reversed(lines):
         line = line.strip()
         if not line.startswith("{"):
             continue
