@@ -39,36 +39,39 @@ def _read_conversation_id(session_path):
         return None
 
 
-def _extract_conversation_id(raw, strict=False):
-    """Extract conversation_id from agy's JSON envelope output.
+_CANONICAL_KEY = "conversation_id"
+_ALIAS_KEYS = ("conversationId", "conversation",
+               "session_id", "sessionId", "id")
 
-    Strict: only whole-output JSON or a JSON-line envelope counts; on
-    miss prints a warning to stderr (callers pass strict=True after a
-    successful run so a missing id is visible instead of silent).
-    """
+
+def _find_id_in_obj(obj):
+    """Prefer canonical `conversation_id`; fall back to alias keys."""
+    if isinstance(obj, dict):
+        v = obj.get(_CANONICAL_KEY)
+        if isinstance(v, str) and v.strip():
+            return (v.strip(), _CANONICAL_KEY)
+        for k in _ALIAS_KEYS:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return (v.strip(), k)
+        for vv in obj.values():
+            if isinstance(vv, dict):
+                found, key = _find_id_in_obj(vv)
+                if found:
+                    return (found, key)
+    return (None, None)
+
+
+def _extract_conversation_id_with_key(raw):
+    """Extract (value, key) preferring `conversation_id` over aliases."""
     if not raw:
-        return None
-    keys = ("conversation_id", "conversationId", "conversation",
-            "session_id", "sessionId", "id")
-
-    def from_obj(obj):
-        if isinstance(obj, dict):
-            for k in keys:
-                v = obj.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-                if isinstance(v, dict):
-                    nested = from_obj(v)
-                    if nested:
-                        return nested
-        return None
-
+        return (None, None)
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
     # 1) Whole-output JSON object.
     try:
-        found = from_obj(json.loads(text))
+        found, key = _find_id_in_obj(json.loads(text))
         if found:
-            return found
+            return (found, key)
     except (ValueError, TypeError):
         pass
     # 2) JSON-lines: scan lines in reverse for last envelope with an id.
@@ -77,12 +80,23 @@ def _extract_conversation_id(raw, strict=False):
         if not line.startswith("{"):
             continue
         try:
-            found = from_obj(json.loads(line))
+            found, key = _find_id_in_obj(json.loads(line))
         except (ValueError, TypeError):
             continue
         if found:
-            return found
-    return None
+            return (found, key)
+    return (None, None)
+
+
+def _extract_conversation_id(raw, strict=False):
+    """Extract conversation_id from agy's JSON envelope output.
+
+    Strict: only whole-output JSON or a JSON-line envelope counts; on
+    miss prints a warning to stderr (callers pass strict=True after a
+    successful run so a missing id is visible instead of silent).
+    """
+    found, _key = _extract_conversation_id_with_key(raw)
+    return found
 
 
 def _extract_agy_result(raw):
@@ -163,6 +177,10 @@ def main():
     parser.add_argument("--result", required=True)
     parser.add_argument("--effort", default=None,
                         choices=["low", "medium", "high", "max"])
+    parser.add_argument("--resume", action="store_true", default=False,
+                        help="Strict resume: require conversation_id pointer "
+                             "before launch and envelope after; exit 3 "
+                             "instead of starting fresh.")
     args = parser.parse_args()
 
     # Validate task file exists
@@ -204,6 +222,19 @@ def main():
 
     # Read existing conversation_id for resume
     conversation_id = _read_conversation_id(args.session)
+
+    # Strict resume: no silent fresh conversation. Fail before any agy call.
+    if args.resume and not conversation_id:
+        msg = "agy-wrapper: no conversation_id, use spawn not resume"
+        print(msg, file=sys.stderr)
+        try:
+            os.makedirs(result_dir, exist_ok=True)
+            _write_failed_result(args.result, args.agent_id, time.time(),
+                                 msg, session_path=args.session,
+                                 conversation_id=None)
+        except Exception:
+            pass
+        sys.exit(3)
 
     # Generate sentinel
     sentinel = secrets.token_hex(4)  # 8 hex chars
@@ -287,11 +318,22 @@ def main():
         sys.exit(1)
 
     # Persist conversation_id from JSON envelope for resume.
-    # Strict parse: warn on miss so a lost conversation is visible.
-    new_conversation_id = _extract_conversation_id(bytes(captured), strict=True)
+    # Strict resume: prefer `conversation_id`, warn on alias keys, exit 3
+    # on miss without overwriting the pointer or claiming continued.
+    new_conversation_id, used_key = _extract_conversation_id_with_key(
+        bytes(captured))
+    resume_envelope_miss = False
     if new_conversation_id:
+        if used_key != _CANONICAL_KEY:
+            print(f"agy-wrapper: warning: using alias key '{used_key}' "
+                  f"for conversation_id; prefer '{_CANONICAL_KEY}'",
+                  file=sys.stderr)
         _write_conversation_id(args.session, new_conversation_id)
         conversation_id = new_conversation_id
+    elif args.resume:
+        resume_envelope_miss = True
+        print("agy-wrapper: no conversation_id in output; "
+              "resume not continued", file=sys.stderr)
     else:
         print("agy-wrapper: warning: no conversation_id envelope in output; "
               "resume will start a fresh conversation", file=sys.stderr)
@@ -337,6 +379,10 @@ def main():
 
     # Write result.json atomically
     _write_result_atomic(args.result, result)
+
+    # Strict resume miss: pointer untouched above; exit 3, never claim continued.
+    if resume_envelope_miss:
+        sys.exit(3)
 
     # Exit with appropriate code
     if exit_signal is not None:
