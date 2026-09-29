@@ -14,9 +14,10 @@ from pathlib import Path
 
 DEFAULT_CONFIG = {
     "defaults": {
-        "model": "opencode/deepseek-v4-flash-free",
+        "model": "opencode/muse-spark-1.3-contributor-free",
         "max_restarts": 5,
         "max_depth": 4,
+        "harness": "pi",
     },
     "security": {
         "inherit_env": True,
@@ -29,6 +30,7 @@ LOCK_FILENAME = "registry.lock"
 LOCKS_DIRNAME = "locks"
 BIN_DIRNAME = "bin"
 WRAPPER_FILENAME = "pi-wrapper"
+HARNESS_WRAPPERS = {"pi": "pi-wrapper", "agy": "agy-wrapper"}
 AGENTS_DIRNAME = "agents"
 TASKS_DIRNAME = "tasks"
 EVENTS_FILENAME = "events.log"
@@ -38,6 +40,7 @@ REQUIRED_CONFIG_KEYS = {
     ("defaults", "model"): str,
     ("defaults", "max_restarts"): int,
     ("defaults", "max_depth"): int,
+    ("defaults", "harness"): str,
     ("security", "inherit_env"): bool,
 }
 
@@ -92,10 +95,30 @@ def locks_dir(sam_home: Path = None) -> Path:
     return sam_home / LOCKS_DIRNAME
 
 
-def wrapper_path(sam_home: Path = None) -> Path:
+def wrapper_path(sam_home: Path = None, harness: str = "pi") -> Path:
     if sam_home is None:
         sam_home = get_sam_home()
-    return sam_home / BIN_DIRNAME / WRAPPER_FILENAME
+    if harness not in HARNESS_WRAPPERS:
+        raise ValueError(
+            f"unknown harness {harness!r}, expected one of {sorted(HARNESS_WRAPPERS)}"
+        )
+    return sam_home / BIN_DIRNAME / HARNESS_WRAPPERS[harness]
+
+
+def resolve_harness(args_harness=None, config: dict = None) -> str:
+    """Resolve harness with precedence: CLI flag → $SAM_HARNESS → config → "pi".
+
+    Raises ValueError on unknown harness.
+    """
+    raw = args_harness or os.environ.get("SAM_HARNESS")
+    if not raw and config:
+        raw = config.get("defaults", {}).get("harness")
+    harness = raw or "pi"
+    if harness not in HARNESS_WRAPPERS:
+        raise ValueError(
+            f"unknown harness {harness!r}, expected one of {sorted(HARNESS_WRAPPERS)}"
+        )
+    return harness
 
 
 def bin_dir(sam_home: Path = None) -> Path:

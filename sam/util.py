@@ -50,14 +50,14 @@ def build_child_env(agent_id, model, depth):
 
 
 def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
-                   result_path, cwd, env):
-    """Launch pi-wrapper as a subprocess in a new session.
+                   result_path, cwd, env, harness="pi", thinking=None, effort=None):
+    """Launch pi-wrapper or agy-wrapper as a subprocess in a new session.
 
     Returns subprocess.Popen object.
-    Validates wrapper basename against allowlist.
+    Validates wrapper basename against allowlist (pi-wrapper, agy-wrapper).
     """
     wrapper = Path(wrapper_path).resolve()
-    if wrapper.name != "pi-wrapper":
+    if wrapper.name not in ("pi-wrapper", "agy-wrapper"):
         raise ValueError(f"allowlist validation failed: {wrapper.name}")
 
     argv = [
@@ -68,6 +68,16 @@ def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
         "--task", str(task_path),
         "--result", str(result_path),
     ]
+    if harness == "agy":
+        if thinking:
+            raise ValueError("--thinking cannot be used with harness 'agy'; use --effort")
+        if effort:
+            argv.extend(["--effort", effort])
+    else:
+        if effort:
+            raise ValueError("--effort requires harness 'agy'")
+        if thinking:
+            argv.extend(["--thinking", thinking])
 
     return subprocess.Popen(
         argv,

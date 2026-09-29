@@ -20,6 +20,7 @@ import time
 
 WRAPPER_VERSION = "0.1.0"
 CHUNK_SIZE = 65536  # 64KB
+HARNESS = "pi"
 
 
 def main():
@@ -169,20 +170,27 @@ def main():
     else:
         final_hint = "failed"
 
-    # Line 28: Build result object
+    # Line 28: Build result object (unified schema shared with agy-wrapper:
+    # agent_id, harness, exit_code, exit_signal, final_state_hint,
+    # duration_ms, wrapper_version, conversation_id, session_path, result;
+    # plus legacy started_at/ended_at/output_path/task_path).
+    # Final-only: result = last assistant message with no toolCall.
     duration_ms = int((ended_at - started_at) * 1000)
     result = {
         "agent_id": args.agent_id,
+        "harness": HARNESS,
         "exit_code": exit_code,
         "exit_signal": exit_signal,
         "final_state_hint": final_hint,
-        "started_at": started_at,
-        "ended_at": ended_at,
         "duration_ms": duration_ms,
         "wrapper_version": WRAPPER_VERSION,
+        "conversation_id": None,
+        "session_path": args.session,
+        "result": _extract_pi_result(args.session),
+        "started_at": started_at,
+        "ended_at": ended_at,
         "output_path": log_path,
         "task_path": args.task,
-        "session_path": args.session,
     }
 
     # Line 29-30: Write result.json atomically
@@ -195,6 +203,46 @@ def main():
         sys.exit(0)
     else:
         sys.exit(1)
+
+
+def _extract_pi_result(session_path):
+    """Best-effort: last assistant message with no toolCall -> text.
+
+    Reads session.jsonl line by line, keeps the last entry where
+    message.role == 'assistant' and no content block has type 'toolCall'.
+    Returns concatenated 'text' blocks, or None when absent/unparseable.
+    """
+    try:
+        if not session_path or not os.path.isfile(session_path):
+            return None
+        last_text = None
+        with open(session_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                msg = entry.get("message")
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                content = msg.get("content")
+                blocks = content if isinstance(content, list) else []
+                if any(isinstance(b, dict) and b.get("type") == "toolCall"
+                       for b in blocks):
+                    continue
+                texts = [b.get("text") for b in blocks
+                         if isinstance(b, dict) and b.get("type") == "text"
+                         and isinstance(b.get("text"), str)]
+                if texts:
+                    last_text = "\n".join(texts)
+        return last_text
+    except OSError:
+        return None
 
 
 def _write_result_atomic(result_path, result_data):
@@ -239,18 +287,23 @@ def _write_result_atomic(result_path, result_data):
         raise
 
 
-def _write_failed_result(result_path, agent_id, started_at, error_message):
-    """Best-effort write a failed result.json."""
+def _write_failed_result(result_path, agent_id, started_at, error_message,
+                         session_path=None):
+    """Best-effort write a failed result.json (unified schema)."""
     try:
         result = {
             "agent_id": agent_id,
+            "harness": HARNESS,
             "exit_code": -1,
             "exit_signal": None,
             "final_state_hint": "failed",
-            "started_at": started_at,
-            "ended_at": time.time(),
             "duration_ms": 0,
             "wrapper_version": WRAPPER_VERSION,
+            "conversation_id": None,
+            "session_path": session_path,
+            "result": None,
+            "started_at": started_at,
+            "ended_at": time.time(),
             "error": error_message,
         }
         _write_result_atomic(result_path, result)

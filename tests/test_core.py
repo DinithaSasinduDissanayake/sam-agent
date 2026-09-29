@@ -75,7 +75,7 @@ class TestConfig:
         """Missing config file should return defaults, not error"""
         from sam.config import load_config
         cfg = load_config(sam_home=sam_home)
-        assert cfg["defaults"]["model"] == "opencode/deepseek-v4-flash-free"
+        assert cfg["defaults"]["model"] == "opencode/muse-spark-1.3-contributor-free"
         assert cfg["defaults"]["max_restarts"] == 1
         assert cfg["security"]["inherit_env"] is True
 

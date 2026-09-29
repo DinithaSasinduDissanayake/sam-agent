@@ -20,6 +20,7 @@ if str(_SAM_PKG) not in sys.path:
     sys.path.insert(0, str(_SAM_PKG))
 
 from sam import config as sam_config
+from sam import harness as sam_harness
 from sam import locks as sam_locks
 from sam import proc as sam_proc
 from sam import registry as sam_registry
@@ -61,6 +62,22 @@ def run(args):
 
         target_name = agent.get("name", "unnamed")
         agent_id = agent["id"]
+
+        # Harness: explicit flag → $SAM_HARNESS → stored entry → config → pi
+        config_early = sam_config.load_config()
+        try:
+            if getattr(args, "harness", None) or os.environ.get("SAM_HARNESS"):
+                harness = sam_config.resolve_harness(getattr(args, "harness", None), config_early)
+            else:
+                harness = agent.get("harness") or sam_config.resolve_harness(None, config_early)
+        except ValueError as e:
+            return _emit_error(2, str(e), as_json)
+        thinking = getattr(args, "thinking", None)
+        effort = getattr(args, "effort", None)
+        if harness == "agy" and thinking:
+            return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
+        if effort and harness != "agy":
+            return _emit_error(2, "--effort requires --harness agy", as_json)
 
         # Line 3: Acquire name lock + registry lock
         with sam_locks.name_lock(target_name, timeout=10):
@@ -105,11 +122,17 @@ def run(args):
                 agent["killed_reason"] = None
                 agent["launch_deadline_at"] = deadline
 
-                # Line 12: New run directory paths
+                # Line 12: New run directory paths (harness decides session).
+                # pi: fresh run-NNN/session.jsonl; agy: preserve
+                # conversation_id pointer so the conversation continues.
                 new_run_dir = sam_config.agents_dir() / agent_id / f"run-{run_count:03d}"
+                prev_session = agent.get("session_path")
+                h = sam_harness.get_harness(harness)
                 agent["log_path"] = str(new_run_dir / "output.log")
                 agent["result_path"] = str(new_run_dir / "result.json")
-                agent["session_path"] = str(new_run_dir / "session.jsonl")
+                agent["session_path"] = h.resume_session(
+                    prev_session, new_run_dir, for_resume=False)
+                agent["harness"] = harness
 
                 # Line 13: Save registry
                 sam_registry.save_registry(registry)
@@ -118,18 +141,23 @@ def run(args):
             new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
             # Line 16: Build argv (same as spawn)
-            wrapper = sam_config.wrapper_path()
+            try:
+                wrapper = sam_config.wrapper_path(harness=harness)
+            except ValueError as e:
+                return _emit_error(2, str(e), as_json)
             if not wrapper.is_file():
                 return _emit_error(1, "wrapper not installed; run sam init first", as_json)
 
-            argv = [
-                str(wrapper),
-                "--agent-id", agent_id,
-                "--model", agent.get("model", ""),
-                "--session", agent["session_path"],
-                "--task", agent["task_path"],
-                "--result", agent["result_path"],
-            ]
+            argv = sam_harness.get_harness(harness).build_argv(
+                wrapper,
+                agent_id,
+                agent.get("model", ""),
+                agent["session_path"],
+                agent["task_path"],
+                agent["result_path"],
+                thinking=thinking if harness != "agy" else None,
+                effort=effort if harness == "agy" else None,
+            )
 
             # Build env (same as spawn)
             env = os.environ.copy()

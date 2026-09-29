@@ -112,6 +112,16 @@ def run(args):
 
     try:
         config = sam_config.load_config()
+        try:
+            harness = sam_config.resolve_harness(getattr(args, "harness", None), config)
+        except ValueError as e:
+            return _emit_error(2, str(e), as_json)
+        thinking = getattr(args, "thinking", None)
+        effort = getattr(args, "effort", None)
+        if harness == "agy" and thinking:
+            return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
+        if effort and harness != "agy":
+            return _emit_error(2, "--effort requires --harness agy", as_json)
         inputs = validate_spawn_inputs(args, config)
         depth = check_depth(config)
 
@@ -122,14 +132,18 @@ def run(args):
         parent_id = os.environ.get("SAM_AGENT_ID")
         root_id = os.environ.get("SAM_ROOT_ID")
 
-        # v0.1.1: concurrency warning — check how many running agents share this model
+        # v0.1.1: concurrency warning — count true-running agents via resolve
         try:
             reg = sam_registry.load_registry()
-            same_model = sum(
-                1 for a in reg.get("agents", [])
-                if a.get("model") == model
-                and a.get("state") in ("spawning", "running")
-            )
+            same_model = 0
+            for a in reg.get("agents", []):
+                if a.get("model") != model:
+                    continue
+                try:
+                    if sam_state.resolve_agent_state(a, a.get("run_id", 1)) == "running":
+                        same_model += 1
+                except Exception:
+                    continue
             if same_model >= 3:
                 print(
                     f"Warning: {same_model} agents already running with model "
@@ -174,6 +188,7 @@ def run(args):
                         "id": agent_id, "name": name, "parent_id": parent_id,
                         "root_id": root_id, "depth": depth,
                         "run_id": run_id, "model": model,
+                        "harness": harness,
                         "state": "spawning", "pid": None, "pgid": None,
                         "pid_start_time": None,
                         "log_path": paths["log_path"],
@@ -205,10 +220,10 @@ def run(args):
             os.chmod(str(dest_task), 0o600)
 
             # Find and validate wrapper
-            wrapper = sam_config.wrapper_path()
+            wrapper = sam_config.wrapper_path(harness=harness)
             if not wrapper.is_file():
                 return _emit_error(1, "wrapper not installed; run sam init first", as_json)
-            if wrapper.resolve().name != "pi-wrapper":
+            if wrapper.resolve().name not in ("pi-wrapper", "agy-wrapper"):
                 return _emit_error(1, "allowlist validation failed", as_json)
 
             argv = [
@@ -219,8 +234,10 @@ def run(args):
                 "--task", paths["task_path"],
                 "--result", paths["result_path"],
             ]
-            thinking = getattr(args, "thinking", None)
-            if thinking:
+            if harness == "agy":
+                if effort:
+                    argv.extend(["--effort", effort])
+            elif thinking:
                 argv.extend(["--thinking", thinking])
 
             env = build_child_env(agent_id, model, depth)

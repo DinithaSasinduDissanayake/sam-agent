@@ -29,42 +29,54 @@ def run(args):
     Line 5: Copy source_wrapper to target_wrapper using shutil.copy2
     Line 6: Call os.chmod(target_wrapper, 0o700) to ensure it is executable
     Line 7: Print JSON success output containing sam_home path. Return 0.
+
+    Installs one wrapper per harness in sam.config.HARNESS_WRAPPERS
+    (pi-wrapper from wrapper/pi_wrapper.py, agy-wrapper from
+    wrapper/agy_wrapper.py). A harness whose source file is missing is
+    skipped gracefully — except pi, which falls back to a placeholder.
     """
     as_json = getattr(args, "json", False)
     try:
         sam_home = sam_config.get_sam_home()
         sam_config.init_sam_home(sam_home=sam_home, force=getattr(args, "force", False))
 
-        # Source wrapper: relative to this file: ../../wrapper/pi_wrapper.py
-        source_wrapper = (_THIS_DIR.parent.parent / "wrapper" / "pi_wrapper.py").resolve()
-        if not source_wrapper.is_file():
-            # Fallback: check sam/__init__.py location for embedded wrapper
-            source_wrapper = (_SAM_PKG.parent / "wrapper" / "pi_wrapper.py").resolve()
-        if not source_wrapper.is_file():
-            # Last resort: look for pi_wrapper.py in the sam package
-            source_wrapper = (_SAM_PKG / "pi_wrapper.py").resolve()
+        wrapper_dir = (_THIS_DIR.parent.parent / "wrapper").resolve()
+        if not wrapper_dir.is_dir():
+            wrapper_dir = (_SAM_PKG.parent / "wrapper").resolve()
+        # source filename per installed basename
+        source_names = {"pi-wrapper": "pi_wrapper.py", "agy-wrapper": "agy_wrapper.py"}
+        installed = []
+        for _harness, _basename in sam_config.HARNESS_WRAPPERS.items():
+            source_wrapper = wrapper_dir / source_names[_basename]
+            if not source_wrapper.is_file():
+                # Last resort: look inside the sam package itself
+                source_wrapper = (_SAM_PKG / source_names[_basename]).resolve()
+            target_wrapper = sam_config.wrapper_path(sam_home, _harness)
+            target_wrapper.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+            if source_wrapper.is_file():
+                shutil.copy2(str(source_wrapper), str(target_wrapper))
+                os.chmod(str(target_wrapper), 0o700)
+                installed.append(str(target_wrapper))
+            elif _basename == sam_config.WRAPPER_FILENAME:
+                # Write a minimal wrapper placeholder (pi only; others skip gracefully)
+                target_wrapper.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import sys, subprocess, json, os, tempfile, time, uuid\n"
+                    "# pi-wrapper placeholder - install full version from sam package\n"
+                    "print('pi-wrapper not installed', file=sys.stderr)\n"
+                    "sys.exit(1)\n"
+                )
+                os.chmod(str(target_wrapper), 0o700)
+                installed.append(str(target_wrapper))
+            # else: agy source missing — skip gracefully
 
         target_wrapper = sam_config.wrapper_path(sam_home)
-        target_wrapper.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-        if source_wrapper.is_file():
-            shutil.copy2(str(source_wrapper), str(target_wrapper))
-            os.chmod(str(target_wrapper), 0o700)
-        else:
-            # Write a minimal wrapper placeholder
-            target_wrapper.write_text(
-                "#!/usr/bin/env python3\n"
-                "import sys, subprocess, json, os, tempfile, time, uuid\n"
-                "# pi-wrapper placeholder - install full version from sam package\n"
-                "print('pi-wrapper not installed', file=sys.stderr)\n"
-                "sys.exit(1)\n"
-            )
-            os.chmod(str(target_wrapper), 0o700)
-
         result = {
             "status": "ok",
             "sam_home": str(sam_home),
             "wrapper": str(target_wrapper),
+            "wrappers": installed,
         }
         if as_json:
             print(json.dumps(result))

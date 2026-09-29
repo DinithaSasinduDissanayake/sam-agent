@@ -416,6 +416,78 @@ def log_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
     return out
 
 
+def agy_envelope_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
+    """Best-effort agy JSON-envelope reader over the log tail. Read-only.
+
+    Agy streams `--output-format json`: whole-output JSON or JSON-lines
+    with a last `response` (or stream-json `result` event). Returns a
+    dict with envelope_found, progress_chars (length of the last
+    response/result text, None when no envelope), usage tokens (always
+    None — agy has no per-message usage stream) plus a reason string,
+    and a warning when the log exists but no envelope parsed (strict
+    parse with warning on miss).
+    """
+    now = time.time() if now is None else now
+    out = {
+        "path": None if log_path is None else str(log_path),
+        "envelope_found": False,
+        "progress_chars": None,
+        "usage_tokens_total": None,
+        "usage_reason": "agy harness has no per-message usage stream; "
+                        "token fields stay None.",
+        "warning": None,
+    }
+    if log_path is None:
+        out["warning"] = "no log_path in registry"
+        return out
+    try:
+        data, _truncated = _read_tail(log_path, max_bytes)
+    except OSError as e:
+        out["warning"] = "read failed: %s" % e
+        return out
+    text = data.decode("utf-8", "replace")
+    candidates = []
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            candidates.append(obj)
+    except (ValueError, TypeError):
+        pass
+    for raw in reversed(text.splitlines()):
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            candidates.append(obj)
+    for obj in candidates:
+        if obj.get("type") == "result":
+            for k in ("result", "response", "text", "output"):
+                v = obj.get(k)
+                if isinstance(v, str) and v:
+                    out["envelope_found"] = True
+                    out["progress_chars"] = len(v)
+                    return out
+        v = obj.get("response")
+        if isinstance(v, str) and v:
+            out["envelope_found"] = True
+            out["progress_chars"] = len(v)
+            return out
+    try:
+        exists = os.path.isfile(log_path)
+    except (OSError, TypeError):
+        exists = False
+    if exists:
+        out["warning"] = ("no agy JSON envelope parsed from log tail; "
+                          "progress unknown")
+    else:
+        out["warning"] = "log file missing"
+    return out
+
+
 def clamp_watch_seconds(seconds):
     """Clamp a watch interval to [WATCH_MIN, WATCH_MAX]. None -> default."""
     if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
@@ -584,11 +656,24 @@ def compute_agent_activity(agent, lifecycle_state,
                            now=None, sleep_fn=None):
     """Full opt-in activity block for one agent. Read-only, never raises.
 
+    Dispatches to the agent's harness (sam/harness.py): pi reuses the
+    session_stats/log_stats/classify pipeline below (output identical to
+    before the refactor); agy uses its conversation_id pointer model.
+
     Returns:
       lifecycle_state, activity_state, evidence,
-      session (session_stats), log (log_stats),
+      session (session_stats or agy pointer stats), log (log_stats),
       watch ({interval_seconds, session delta, log delta}) when requested.
     """
+    from sam import harness as sam_harness  # lazy: harness delegates back here
+    try:
+        h = sam_harness.get_harness((agent or {}).get("harness") or "pi")
+        return h.activity(agent, lifecycle_state,
+                          stall_seconds=stall_seconds, watch=watch,
+                          max_bytes=max_bytes, now=now, sleep_fn=sleep_fn)
+    except Exception:
+        pass
+    # Fallback: inline pi pipeline (identical shape) if harness lookup fails.
     now = time.time() if now is None else now
     session = session_stats(agent.get("session_path"), now=now,
                             max_bytes=max_bytes)

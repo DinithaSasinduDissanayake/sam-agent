@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sam import config as sam_config
+from sam import harness as sam_harness
 from sam import locks as sam_locks
 from sam import proc as sam_proc
 from sam import registry as sam_registry
@@ -64,6 +65,21 @@ def run(args):
         if not model:
             return _emit(1, "no model configured", as_json)
 
+        # Harness: explicit flag → $SAM_HARNESS → stored entry → config → pi
+        try:
+            if getattr(args, "harness", None) or os.environ.get("SAM_HARNESS"):
+                harness = sam_config.resolve_harness(getattr(args, "harness", None), config)
+            else:
+                harness = agent.get("harness") or sam_config.resolve_harness(None, config)
+        except ValueError as e:
+            return _emit(2, str(e), as_json)
+        thinking = getattr(args, "thinking", None)
+        effort = getattr(args, "effort", None)
+        if harness == "agy" and thinking:
+            return _emit(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
+        if effort and harness != "agy":
+            return _emit(2, "--effort requires --harness agy", as_json)
+
         # Lock sequence: name lock + registry lock
         try:
             with sam_locks.name_lock(agent_name, timeout=10):
@@ -80,9 +96,12 @@ def run(args):
                     if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
                         return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
-                    # Check session file exists
+                    # Check session file exists (pi requires the session.jsonl;
+                    # agy resumes from the conversation_id pointer, and a
+                    # missing pointer simply starts a fresh conversation).
                     session_path = agent.get("session_path")
-                    if not session_path or not os.path.exists(session_path):
+                    if harness == "pi" and (
+                            not session_path or not os.path.exists(session_path)):
                         return _emit(1, f"session file not found: {session_path}", as_json)
 
                     # Check restart budget
@@ -95,7 +114,11 @@ def run(args):
                     run_count = agent.get("run_count", 1) + 1
                     new_run_dir = sam_config.agents_dir() / agent_id / f"run-{run_count:03d}"
 
-                    # Update registry: preserve session_path, update run paths
+                    # Update registry: harness decides the session path.
+                    # pi resume preserves the session file (history continues);
+                    # agy resume preserves the conversation_id pointer.
+                    h = sam_harness.get_harness(harness)
+                    prev_session = agent.get("session_path")
                     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     agent["state"] = "spawning"
                     agent["pid"] = None
@@ -107,12 +130,15 @@ def run(args):
                     agent["run_id"] = run_count
                     agent["run_count"] = run_count
                     agent["restart_count"] = rc + 1
-                    # session_path is UNCHANGED (preserves history)
+                    # session_path via harness.resume (preserves history/pointer)
+                    agent["session_path"] = h.resume_session(
+                        prev_session, new_run_dir, for_resume=True)
                     agent["log_path"] = str(new_run_dir / "output.log")
                     agent["result_path"] = str(new_run_dir / "result.json")
                     # task_path is writable but might be overwritten below
                     # model can be updated
                     agent["model"] = model
+                    agent["harness"] = harness
                     agent["updated_at"] = now_str
 
                     sam_registry.save_registry(reg)
@@ -129,21 +155,23 @@ def run(args):
         new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
         # Build argv and env (same as spawn)
-        wrapper = sam_config.wrapper_path()
+        try:
+            wrapper = sam_config.wrapper_path(harness=harness)
+        except ValueError as e:
+            return _emit(2, str(e), as_json)
         if not wrapper.is_file():
             return _emit(1, "wrapper not installed; run sam init first", as_json)
 
-        argv = [
-            str(wrapper),
-            "--agent-id", agent_id,
-            "--model", model,
-            "--session", agent["session_path"],
-            "--task", str(sam_task_path),
-            "--result", agent["result_path"],
-        ]
-        thinking = getattr(args, "thinking", None)
-        if thinking:
-            argv.extend(["--thinking", thinking])
+        argv = sam_harness.get_harness(harness).build_argv(
+            wrapper,
+            agent_id,
+            model,
+            agent["session_path"],
+            str(sam_task_path),
+            agent["result_path"],
+            thinking=thinking if harness != "agy" else None,
+            effort=effort if harness == "agy" else None,
+        )
 
         parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
         env = sam_util.build_child_env(agent_id, model, parent_depth)
