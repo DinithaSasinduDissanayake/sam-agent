@@ -3,7 +3,12 @@
 
 Spec: reviews-phase-f-batch2.md — GLM-5.2 §4 + Grok-4.5 shared helpers
 
-Default output (text and JSON) is unchanged. Opt-in enrichment:
+Lean default list: last 10 non-terminal (non-pruned) newest-first.
+  --all               full list (no truncation)
+  --limit N           max rows (overrides default 10 and --all)
+  --fields a,b,c      comma list projection for --json (e.g. name,state,elapsed)
+Default table columns: NAME STATE AGE (human elapsed; no PID/ID).
+Opt-in enrichment (unchanged):
   --detail            adds the conservative activity layer (sam/activity.py)
   --watch [SECONDS]   adds two-sample byte deltas (implies --detail)
   --stall-seconds N   threshold before a verified-live agent is
@@ -20,9 +25,38 @@ if str(_SAM_PKG) not in sys.path:
     sys.path.insert(0, str(_SAM_PKG))
 
 from sam import config as sam_config
+from sam import locks as sam_locks
 from sam import registry as sam_registry
 from sam import state as sam_state
 from sam import activity as sam_activity
+from datetime import datetime, timezone
+
+
+def _writeback_terminals(updates):
+    """Persist resolved terminal states differing from stored state.
+
+    updates: dict agent_id -> resolved terminal state. Best-effort;
+    reloads under exclusive lock, sets state + updated_at, atomic save.
+    """
+    if not updates:
+        return
+    try:
+        with sam_locks.registry_lock(exclusive=True, timeout=10):
+            registry = sam_registry.load_registry()
+            dirty = False
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for a in registry.get("agents", []):
+                rid = updates.get(a.get("id"))
+                if rid is None:
+                    continue
+                if rid in sam_state.TERMINAL_STATES and a.get("state") != rid:
+                    a["state"] = rid
+                    a["updated_at"] = now_str
+                    dirty = True
+            if dirty:
+                sam_registry.save_registry(registry)
+    except Exception:
+        pass
 
 
 _DETAIL_HEADER = (
@@ -46,6 +80,68 @@ def _fmt_age(age):
     if age is None:
         return "-"
     return "%ds" % int(age)
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    try:
+        s = str(value).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _elapsed_seconds(entry):
+    dt = _parse_ts(entry.get("created_at"))
+    if dt is None:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        return max(0, int((now - dt).total_seconds()))
+    except Exception:
+        return None
+
+
+def _fmt_elapsed(entry):
+    secs = _elapsed_seconds(entry)
+    if secs is None:
+        return "-"
+    if secs < 60:
+        return "%ds" % secs
+    mins = secs // 60
+    if mins < 60:
+        return "%dm" % mins
+    hours = mins // 60
+    if hours < 24:
+        rem = mins % 60
+        return "%dh%02dm" % (hours, rem) if rem else "%dh" % hours
+    days = hours // 24
+    rem_h = hours % 24
+    return "%dd%02dh" % (days, rem_h) if rem_h else "%dd" % days
+
+
+def _parse_fields(raw):
+    if not raw:
+        return None
+    fields = [f.strip().lower() for f in str(raw).split(",") if f.strip()]
+    return fields or None
+
+
+def _project_fields(entry, fields):
+    out = {}
+    for f in fields:
+        if f == "name":
+            out["name"] = entry.get("name")
+        elif f == "state":
+            out["state"] = entry.get("resolved_state", entry.get("state"))
+        elif f in ("elapsed", "age"):
+            out[f] = _elapsed_seconds(entry)
+        else:
+            out[f] = entry.get(f)
+    return out
 
 
 def _fmt_num(value):
@@ -197,6 +293,16 @@ def run(args):
 
     # v0.1.1: --all flag shows terminal agents too; default hides them
     show_all = getattr(args, "all", False)
+    show_archived_only = getattr(args, "archived", False)
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return _emit_error(1, "invalid --limit (must be an integer)", as_json)
+        if limit < 0:
+            return _emit_error(1, "invalid --limit (must be >= 0)", as_json)
+    fields = _parse_fields(getattr(args, "fields", None))
 
     # v0.1.2: opt-in activity enrichment (read-only, conservative).
     detail = getattr(args, "detail", False)
@@ -243,29 +349,33 @@ def run(args):
         except Exception:
             agent = dict(agent)
             agent["resolved_state"] = "unknown"
+            resolved = "unknown"
+
+        _writeback_terminals({agent["id"]: resolved} if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state") else {})
 
         if detail:
             agent["activity"] = _compute_activity(
                 agent, agent["resolved_state"], stall_seconds, watch)
 
         if as_json:
-            print(json.dumps(agent, default=str))
+            out = _project_fields(agent, fields) if fields else agent
+            print(json.dumps(out, default=str))
         else:
             s = agent.get("resolved_state", "?")
-            pid = agent.get("pid", "?")
-            print(f"{agent.get('id','?'):20s} {agent.get('name','?'):20s} "
-                  f"{s:10s} pid={pid}")
             if detail:
+                print(f"{agent.get('id','?'):20s} {agent.get('name','?'):20s} "
+                      f"{s:10s} pid={agent.get('pid', '?')}")
                 _print_activity_detail(agent["activity"], indent="  ")
+            else:
+                print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s}")
+                print("-" * 40)
+                print(f"{agent.get('name','?'):20s} {s:10s} "
+                      f"{_fmt_elapsed(agent):8s}")
         return 0
 
-    # List mode
-    # v0.1.1: filter to active (non-terminal) by default unless --all
-    if not show_all:
-        agents = [a for a in agents
-                  if a.get("state") not in sam_state.TERMINAL_STATES]
-
+    # List mode: resolve first, then filter default view on resolved state.
     resolved_list = []
+    updates = {}
     for a in agents:
         try:
             resolved = sam_state.resolve_agent_state(a, a.get("run_id", 1))
@@ -274,9 +384,34 @@ def run(args):
         except Exception:
             entry = dict(a)
             entry["resolved_state"] = "failed"
+            resolved = "failed"
+        if resolved in sam_state.TERMINAL_STATES and resolved != a.get("state"):
+            updates[a.get("id")] = resolved
         resolved_list.append(entry)
 
+    _writeback_terminals(updates)
+
+    # Lean default: non-terminal + non-pruned + non-archived, newest-first,
+    # last 10; --all keeps everything unfiltered but still attaches
+    # resolved_state; --archived lists only archived entries.
+    # Single-agent lookup above always works on archived entries, as do
+    # `sam logs` and `sam result` (no archived filtering there).
+    show_archived_col = bool(show_all or show_archived_only)
+    if show_archived_only:
+        resolved_list = [e for e in resolved_list if e.get("archived")]
+    elif not show_all:
+        resolved_list = [e for e in resolved_list
+                         if e.get("resolved_state") not in sam_state.TERMINAL_STATES
+                         and not e.get("pruned")
+                         and not e.get("archived")]
+
     resolved_list.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
+    # Truncation: explicit --limit wins; else default 10 unless --all.
+    if limit is not None:
+        resolved_list = resolved_list[:limit]
+    elif not show_all:
+        resolved_list = resolved_list[:10]
 
     if detail and watch is not None and len(resolved_list) >= _WATCH_WARN_THRESHOLD:
         print(f"sam: warning: --watch on {len(resolved_list)} agents may be "
@@ -288,19 +423,29 @@ def run(args):
                 entry, entry["resolved_state"], stall_seconds, watch)
 
     if as_json:
-        print(json.dumps(resolved_list, default=str))
+        out = [_project_fields(e, fields) for e in resolved_list] if fields else resolved_list
+        print(json.dumps(out, default=str))
     else:
         if detail:
             print(_DETAIL_HEADER)
             print("-" * len(_DETAIL_HEADER))
             for a in resolved_list:
                 print(_detail_row(a))
-        else:
-            print(f"{'ID':20s} {'NAME':20s} {'STATE':10s} {'PID':8s}")
-            print("-" * 60)
+                if a.get("archived"):
+                    print(f"{'':20s} {'':20s} {'':10s} archived")
+        elif show_archived_col:
+            print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s} {'ARCHIVED':8s}")
+            print("-" * 49)
             for a in resolved_list:
                 s = a.get("resolved_state", "?")
-                pid = str(a.get("pid", "?"))
-                print(f"{a.get('id','?'):20s} {a.get('name','?'):20s} "
-                      f"{s:10s} pid={pid}")
+                flag = "archived" if a.get("archived") else "-"
+                print(f"{a.get('name','?'):20s} {s:10s} "
+                      f"{_fmt_elapsed(a):8s} {flag:8s}")
+        else:
+            print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s}")
+            print("-" * 40)
+            for a in resolved_list:
+                s = a.get("resolved_state", "?")
+                print(f"{a.get('name','?'):20s} {s:10s} "
+                      f"{_fmt_elapsed(a):8s}")
     return 0

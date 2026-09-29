@@ -613,10 +613,9 @@ class TestStatusCommand:
         code = run_status(sam_home, json_out=False)
         lines = capsys.readouterr().out.splitlines()
         assert code == 0
-        assert "ID" in lines[0] and "NAME" in lines[0]
-        assert "STATE" in lines[0] and "PID" in lines[0]
+        assert "NAME" in lines[0] and "STATE" in lines[0] and "AGE" in lines[0]
         assert "ACTIVITY" not in lines[0]
-        assert lines[1] == "-" * 60
+        assert lines[1] == "-" * 40
         assert "running" in lines[2]
 
     def test_detail_text_has_activity_column(self, sam_home, capsys):
