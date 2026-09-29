@@ -39,12 +39,21 @@ def main():
     p_spawn.add_argument("--model", default=None, help="Model override")
     p_spawn.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
                          help="Thinking/reasoning level for model (off, minimal, low, medium, high, xhigh, max)")
+    p_spawn.add_argument("--harness", default=None, choices=["pi", "agy"],
+                         help="Harness wrapper to use (default $SAM_HARNESS, config defaults.harness, or pi)")
+    p_spawn.add_argument("--effort", default=None,
+                         help="Effort level for agy harness (agy only; cannot combine --thinking with agy)")
     p_spawn.add_argument("--cwd", default=None, help="Working directory")
 
     p_status = sub.add_parser("status", parents=[base_parser], help="Show agent state")
     p_status.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_status.add_argument("--name", default=None, help="Agent name (alternative)")
-    p_status.add_argument("--all", action="store_true", help="Show all agents including terminal")
+    p_status.add_argument("--all", action="store_true", help="Show all agents including terminal and archived (full list)")
+    p_status.add_argument("--archived", action="store_true", help="Show only archived agents")
+    p_status.add_argument("--limit", type=int, default=None,
+                          help="Max agents to list (default 10 newest, --all for full)")
+    p_status.add_argument("--fields", default=None,
+                          help="Comma list for --json (e.g. name,state,elapsed)")
     p_status.add_argument("--detail", action="store_true",
                           help="Show detailed activity signals (read-only, opt-in)")
     p_status.add_argument("--watch", nargs="?", const=5, type=int, default=None,
@@ -73,12 +82,23 @@ def main():
     p_restart = sub.add_parser("restart", parents=[base_parser], help="Restart a terminal agent")
     p_restart.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_restart.add_argument("--name", default=None, help="Agent name (alternative)")
+    p_restart.add_argument("--harness", default=None, choices=["pi", "agy"],
+                           help="Harness wrapper to use (default stored harness, $SAM_HARNESS, config, or pi)")
+    p_restart.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+                           help="Thinking/reasoning level override for model (pi only)")
+    p_restart.add_argument("--effort", default=None,
+                           help="Effort level for agy harness (agy only)")
 
     # v0.1.1: skill — print SKILL.md for AI agents
     p_skill = sub.add_parser("skill", parents=[base_parser], help="Print SKILL.md for AI agents")
 
-    # v0.1.1: prune — remove terminal agents
-    p_prune = sub.add_parser("prune", parents=[base_parser], help="Remove terminal agents from registry")
+    # v0.1.1: prune — hide terminal agents (archived flag, never deletes)
+    p_prune = sub.add_parser("prune", parents=[base_parser], help="Archive terminal agents (hide, never deletes)")
+    p_prune.add_argument("id", nargs="?", default=None, help="Agent ID or name to archive")
+    p_prune.add_argument("--all", action="store_true", help="Archive all terminal agents")
+
+    p_unprune = sub.add_parser("unprune", parents=[base_parser], help="Restore an archived agent")
+    p_unprune.add_argument("id", help="Agent ID or name to restore")
 
     # v0.1.2: resume — continue agent session with new task
     p_resume = sub.add_parser("resume", parents=[base_parser], help="Resume terminal agent with new task")
@@ -88,6 +108,14 @@ def main():
     p_resume.add_argument("--model", default=None, help="Model override")
     p_resume.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
                          help="Thinking/reasoning level override for model")
+    p_resume.add_argument("--harness", default=None, choices=["pi", "agy"],
+                          help="Harness wrapper to use (default stored harness, $SAM_HARNESS, config, or pi)")
+    p_resume.add_argument("--effort", default=None,
+                          help="Effort level for agy harness (agy only)")
+
+    p_result = sub.add_parser("result", parents=[base_parser], help="Print agent final result")
+    p_result.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
+    p_result.add_argument("--name", default=None, help="Agent name (alternative)")
 
     # Parse everything at once — argparse handles help natively
     args = parser.parse_args()
@@ -126,8 +154,12 @@ def main():
             sys.exit(0)
         elif cmd == "prune":
             from sam.commands.prune import run as cmd_run
+        elif cmd == "unprune":
+            from sam.commands.unprune import run as cmd_run
         elif cmd == "resume":
             from sam.commands.resume import run as cmd_run
+        elif cmd == "result":
+            from sam.commands.result import run as cmd_run
         else:
             print(f"sam: unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)
