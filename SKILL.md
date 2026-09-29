@@ -12,28 +12,35 @@ markdown file. SAM tracks process state, captures output, and handles cleanup.
 
 ---
 
-## Quick Start (3 commands)
+## Quick Start (spawn-and-forget)
+
+Spawn-and-forget is the default. Do NOT auto-wait after spawn — the parent
+keeps working and only rendezvous when it needs the child's output.
 
 ```bash
-# 1. Spawn a sub-agent
-sam spawn --name my-task --task ./tasks/refactor-auth.md --cwd /home/user/project
+# 1. Spawn and keep working (no auto-wait)
+sam spawn --name research-auth-n1 --task ./tasks/refactor-auth.md --cwd /home/user/project
 
-# 2. Block until it finishes
-sam wait my-task --json
+# 2. Rendezvous only when the output is needed
+sam wait research-auth-n1 --json
 
-# 3. Read its output
-sam logs my-task -n 200
+# 3. Read final output first, then logs if needed
+sam result research-auth-n1
+sam logs research-auth-n1 -n 50
 ```
+
+Name agents with long kebab-case `<area>-<task>-<n>`
+(e.g. `research-auth-n1`, `frozen-meatballs-prices-n2`). Never reuse a
+non-terminal agent's name.
 
 ---
 
-## The 3-Command Contract
+## The Contract
 
-The core workflow is always the same three steps:
-
-1. **`sam spawn`** — Creates a sub-agent process, assigns it a stable name, copies your task file, launches it in the background.
-2. **`sam wait`** — Blocks until the agent reaches a terminal state (completed/failed/killed). Returns a JSON object with status, exit code, and paths to output files.
-3. **`sam logs`** — Shows the agent's stdout/stderr output. Sentinels like `##PI_BEGIN_...` are stripped by default.
+1. **`sam spawn`** — Creates a sub-agent process, assigns it a stable `<area>-<task>-<n>` kebab name, copies your task file, launches it in the background. Forget it; keep working.
+2. **`sam wait`** — Rendezvous only: blocks until the agent reaches a terminal state (completed/failed/killed). Returns JSON with status, exit code, and output paths.
+3. **`sam result`** — Final-only output text. Cheapest read after `status`.
+4. **`sam logs -n 50`** — Full stream tail when `result` is not enough. Sentinels like `##PI_BEGIN_...` are stripped by default.
 
 ---
 
@@ -56,7 +63,7 @@ sam init [--force]
 Start a background sub-agent.
 
 ```bash
-sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>]
+sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>] [--thinking <level>] [--harness <pi|agy>] [--effort <level>]
 ```
 
 | Flag | Required | Description |
@@ -66,20 +73,51 @@ sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>]
 | `--cwd` | No | Working directory (default: task file's parent directory) |
 | `--model` | No | Model to use (default: from config or SAM_MODEL env) |
 | `--thinking` | No | Thinking/reasoning level for model (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `--harness` | No | Harness wrapper (`pi`, `agy`; default: `pi` via $SAM_HARNESS or config defaults.harness) |
+| `--effort` | No | Effort level for `agy` harness only; cannot combine `--thinking` with `agy` |
 
 **Output:** Agent ID like `sam-20260716-103042-a1b2c3`.
 
-### `sam status`
-
-Check agent state.
-
+**Agy example:**
 ```bash
-sam status [<id-or-name>] [--json]
+sam spawn --name research-auth --task /tmp/task-refactor.md --harness agy --effort high
 ```
 
-Without arguments, lists all agents. With an ID or name, shows that agent.
+### `sam status`
 
-States: `spawning`, `running`, `completed`, `failed`, `killed`. Resolved dynamically.
+Check agent state. Lean by default: last 10 non-terminal agents,
+newest-first, columns `NAME STATE AGE` (no PID/ID noise).
+
+```bash
+sam status [<id-or-name>] [--json] [--all] [--limit N] [--detail] [--watch [SECONDS]]
+```
+
+| Flag | Effect |
+|------|--------|
+| `--all` | Full list incl. terminal + archived |
+| `--limit N` | Max rows (overrides default 10 and `--all`) |
+| `--detail` | Activity layer (tokens/progress or null with reason) |
+| `--watch [SECONDS]` | Live dashboard: two-sample byte deltas over SECONDS (1–30, default 5); implies `--detail` |
+
+States: `spawning`, `running`, `completed`, `failed`, `killed`, `unknown`.
+Resolved dynamically; terminal states are written back to the registry.
+
+Live dashboard entry: `sam status --watch [SECONDS]` (alias entry point
+`sam-tui` where installed runs the same view). There is no notify daemon —
+poll with `status` or rendezvous with `wait`.
+
+### `sam result`
+
+Print an agent's final output only (from `result.json`).
+
+```bash
+sam result <id-or-name> [--json]
+```
+
+Read tiers, cheapest first: `status` → `result` → `logs -n 50`.
+`result` is final-only text; reach for `logs` only when you need the full
+stream. `logs` tails 50 lines by default (`-n`), sentinels stripped unless
+`--raw`.
 
 ### `sam wait`
 
@@ -138,6 +176,18 @@ sam restart <id-or-name>
 ```
 
 Same name, same task, new process. Only works on terminal agents.
+Agy restarts preserve the `conversation_id` pointer so the conversation
+continues; pi restarts use a fresh `run-NNN/session.jsonl`.
+
+### `sam prune` / `sam unprune`
+
+Prune hides, never deletes. `sam prune` sets `archived=true` on terminal
+agents (directories, logs, results stay intact); `sam unprune` restores.
+
+```bash
+sam prune [id|--all]   # no args = all terminal
+sam unprune <id-or-name>
+```
 
 ---
 
@@ -147,21 +197,25 @@ When a `pi` agent spawns a child sub-agent:
 
 1. **Write a self-contained task file** — The sub-agent receives ONLY this task file. No inherited conversation context. Include goal, constraints, deliverables, and verification steps.
 
-2. **Spawn the sub-agent:**
+2. **Spawn the sub-agent (forget by default — no auto-wait):**
    ```bash
-   sam spawn --name research-auth --task /tmp/task-refactor.md --cwd /home/user/project
+   sam spawn --name research-auth-n1 --task /tmp/task-refactor.md --cwd /home/user/project
    ```
+   Keep working. Rendezvous with `sam wait` only when you need the output.
 
-3. **Wait for completion:**
+3. **Wait only on rendezvous:**
    ```bash
-   sam wait research-auth --json
+   sam wait research-auth-n1 --json
    ```
-   Blocks until done. Returns result JSON with `status`, `exit_code`, and `result.output_path`.
+   Blocks until done. Returns result JSON with `status`, `exit_code`, and `result.output_path`. Prefer `wait` over polling `status`.
 
-4. **Inspect the output:**
+4. **Inspect the output, cheapest tier first:**
    ```bash
-   sam logs research-auth -n 200
+   sam result research-auth-n1
+   sam logs research-auth-n1 -n 50
    ```
+   `status` → `result` → `logs -n 50`. `result` is final-only;
+   `logs` (default 50 lines) is for the full stream.
 
 5. **Handle timeout:** If `sam wait` times out, run `sam kill` before retrying.
 
@@ -172,12 +226,14 @@ When a `pi` agent spawns a child sub-agent:
 ## Rules & Constraints
 
 1. **Name format:** `^[a-zA-Z0-9_-]{1,64}$`. Slashes, spaces, and dots are not allowed.
-2. **Name uniqueness:** Never reuse a non-terminal agent's name. Terminal names can be reused.
+2. **Name uniqueness:** Never reuse a non-terminal agent's name. Terminal names can be reused. Prefer long kebab-case `<area>-<task>-<n>` (e.g. `research-auth-n1`).
 3. **Depth limit:** Max 4 levels. Top-level = 0. Attempting deeper returns an error.
 4. **Task files must be self-contained.** The sub-agent has no access to the parent's conversation history. Include all necessary context.
 5. **Never edit `~/.sam/registry.json` directly.** Always use SAM commands.
-6. **Prefer `sam wait` over polling `sam status`.** Wait handles state reconciliation automatically.
+6. **Spawn-and-forget by default.** Never auto-wait after spawn. `wait` only on rendezvous, when the child's output is actually needed.
+7. **Read tiers: `status` → `result` → `logs -n 50`.** `result` is final-only and cheapest after `status`; `logs` (default 50 lines) is the last resort for the full stream.
 7. **Pass `--model` only when overriding the default.** Children inherit `SAM_MODEL` automatically.
+8. **Default model failure:** the hardcoded default is the only supported model. If a spawn fails with model errors (`FreeTierError`, `Model unavailable`, `403`, `not found for provider`), do NOT retry with other models. Ask the user whether it is time to update the default or the failure is just rate limits.
 
 ---
 
