@@ -39,6 +39,8 @@ sam logs worker -n 50
 
 All commands accept `--json` for machine-readable output and `--sam-home <path>` to override the data directory.
 
+Live dashboard: `sam status --watch [SECONDS]` polls a two-sample byte delta over SECONDS (1–30, default 5) and implies `--detail`; where installed, `sam-tui` is shorthand for the same view — run `sam-tui [SECONDS]` (or `sam status --watch 1 --json` for scripted polling, exit 0), watch `failed!`/`unknown?stale` hint markers with the AGE column for staleness, then rendezvous with `sam wait` (there is no notify daemon).
+
 ## How it works
 
 - Agents are tracked in a JSON registry with flock-based locking

@@ -16,6 +16,7 @@ Opt-in enrichment (unchanged):
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -66,6 +67,43 @@ _DETAIL_HEADER = (
 )
 
 _WATCH_WARN_THRESHOLD = 100
+
+# Dashboard hints (stdlib-only: no color lib). Failed/unknown rows get a
+# `?`/`!` marker plus ANSI color when stdout is a TTY (honors NO_COLOR).
+# `unknown` always renders as `unknown?stale`; AGE column shows elapsed
+# since created_at.
+_ANSI_RED = "\033[31m"
+_ANSI_YELLOW = "\033[33m"
+_ANSI_RESET = "\033[0m"
+
+_HINT_LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
+                "no result.json (check logs/result). AGE = elapsed since created_at.")
+
+
+def _use_color():
+    if os.environ.get("NO_COLOR"):
+        return False
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _fmt_state(state):
+    """Human STATE cell with dashboard hint markers (text output only)."""
+    s = state if state else "?"
+    if s == "failed":
+        display = "failed!"
+    elif s == "unknown":
+        display = "unknown?stale"
+    else:
+        display = s
+    if _use_color():
+        if s == "failed":
+            return f"{_ANSI_RED}{display}{_ANSI_RESET}"
+        if s == "unknown":
+            return f"{_ANSI_YELLOW}{display}{_ANSI_RESET}"
+    return display
 
 
 def _emit_error(code, message, as_json):
@@ -196,7 +234,7 @@ def _detail_row(a):
     st = act.get("activity_state") or a.get("resolved_state") or "?"
     row = (
         f"{a.get('id', '?'):20s} {a.get('name', '?'):20s} "
-        f"{a.get('resolved_state', '?'):10s} {st:18s} "
+        f"{_fmt_state(a.get('resolved_state', '?')):10s} {st:18s} "
         f"{_fmt_age(ss.get('last_event_age')):10s} "
         f"{_fmt_num(ss.get('recent_event_bytes_30s')):8s} "
         f"{_fmt_tokens(ss, 'usage_tokens_30s'):9s} "
@@ -369,8 +407,10 @@ def run(args):
             else:
                 print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s}")
                 print("-" * 40)
-                print(f"{agent.get('name','?'):20s} {s:10s} "
+                print(f"{agent.get('name','?'):20s} {_fmt_state(s):10s} "
                       f"{_fmt_elapsed(agent):8s}")
+                if s in ("failed", "unknown"):
+                    print(_HINT_LEGEND)
         return 0
 
     # List mode: resolve first, then filter default view on resolved state.
@@ -433,19 +473,22 @@ def run(args):
                 print(_detail_row(a))
                 if a.get("archived"):
                     print(f"{'':20s} {'':20s} {'':10s} archived")
+            print(_HINT_LEGEND)
         elif show_archived_col:
             print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s} {'ARCHIVED':8s}")
             print("-" * 49)
             for a in resolved_list:
                 s = a.get("resolved_state", "?")
                 flag = "archived" if a.get("archived") else "-"
-                print(f"{a.get('name','?'):20s} {s:10s} "
+                print(f"{a.get('name','?'):20s} {_fmt_state(s):10s} "
                       f"{_fmt_elapsed(a):8s} {flag:8s}")
+            print(_HINT_LEGEND)
         else:
             print(f"{'NAME':20s} {'STATE':10s} {'AGE':8s}")
             print("-" * 40)
             for a in resolved_list:
                 s = a.get("resolved_state", "?")
-                print(f"{a.get('name','?'):20s} {s:10s} "
+                print(f"{a.get('name','?'):20s} {_fmt_state(s):10s} "
                       f"{_fmt_elapsed(a):8s}")
+            print(_HINT_LEGEND)
     return 0
