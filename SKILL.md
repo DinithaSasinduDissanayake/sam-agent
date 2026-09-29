@@ -2,10 +2,11 @@
 
 ## What is SAM?
 
-SAM is a CLI tool that lets you (a `pi` agent) spawn background sub-agents,
+SAM is a CLI tool that lets you (an AI agent, human operator, or any CLI invoker) spawn
+background sub-agents,
 wait for them to finish, read their output, and kill or restart them.
 
-Each sub-agent is an independent `pi` process running a task you define in a
+Each sub-agent is an independent `pi`/`agy` worker process running a task you define in a
 markdown file. SAM tracks process state, captures output, and handles cleanup.
 
 **Platform:** Linux only. Python 3.9+. No external dependencies.
@@ -14,7 +15,7 @@ markdown file. SAM tracks process state, captures output, and handles cleanup.
 
 ## Quick Start (spawn-and-forget)
 
-Spawn-and-forget is the default. Do NOT auto-wait after spawn — the parent
+Spawn-and-forget is the default. Do NOT auto-wait after spawn — the parent/invoking process
 keeps working and only rendezvous when it needs the child's output.
 
 ```bash
@@ -41,6 +42,7 @@ non-terminal agent's name.
 2. **`sam wait`** — Rendezvous only: blocks until the agent reaches a terminal state (completed/failed/killed). Returns JSON with status, exit code, and output paths.
 3. **`sam result`** — Final-only output text. Cheapest read after `status`.
 4. **`sam logs -n 50`** — Full stream tail when `result` is not enough. Sentinels like `##PI_BEGIN_...` are stripped by default.
+5. **`sam resume`** — Tier-1 alongside `status`/`result`: reattach to a running agent's session instead of tailing logs; use when you need interactive follow-up rather than final-only output.
 
 ---
 
@@ -193,7 +195,7 @@ sam unprune <id-or-name>
 
 ## Agent-to-Agent Contract
 
-When a `pi` agent spawns a child sub-agent:
+When an invoker (any agent/human/CLI) spawns a child sub-agent:
 
 1. **Write a self-contained task file** — The sub-agent receives ONLY this task file. No inherited conversation context. Include goal, constraints, deliverables, and verification steps.
 
@@ -228,7 +230,7 @@ When a `pi` agent spawns a child sub-agent:
 1. **Name format:** `^[a-zA-Z0-9_-]{1,64}$`. Slashes, spaces, and dots are not allowed.
 2. **Name uniqueness:** Never reuse a non-terminal agent's name. Terminal names can be reused. Prefer long kebab-case `<area>-<task>-<n>` (e.g. `research-auth-n1`).
 3. **Depth limit:** Max 4 levels. Top-level = 0. Attempting deeper returns an error.
-4. **Task files must be self-contained.** The sub-agent has no access to the parent's conversation history. Include all necessary context.
+4. **Task files must be self-contained.** The sub-agent has no access to the parent/invoking process's conversation history. Include all necessary context.
 5. **Never edit `~/.sam/registry.json` directly.** Always use SAM commands.
 6. **Spawn-and-forget by default.** Never auto-wait after spawn. `wait` only on rendezvous, when the child's output is actually needed.
 7. **Read tiers: `status` → `result` → `logs -n 50`.** `result` is final-only and cheapest after `status`; `logs` (default 50 lines) is the last resort for the full stream.
@@ -257,7 +259,7 @@ When a `pi` agent spawns a child sub-agent:
 ## Limitations (v0.1)
 
 - **Linux only.** SAM uses `/proc/<pid>/stat` and `fcntl.flock`.
-- **No daemon.** If the parent `pi` process exits, orphaned sub-agents may continue running. SAM tracks PIDs in the registry so you can find them later.
+- **No daemon.** If the parent/invoking process exits, orphaned sub-agents may continue running. SAM tracks PIDs in the registry so you can find them later.
 - **No automatic recovery.** If the CLI crashes during `sam spawn`, an agent may be stuck in `spawning` state. After 30 seconds, use `sam restart` or `sam kill` to recover.
-- **Full environment passthrough.** Sub-agents inherit the parent's environment variables, including API keys. This is a known v0.1 limitation.
+- **Full environment passthrough.** Sub-agents inherit the invoker's environment variables, including API keys. This is a known v0.1 limitation.
 - **Registry is a single JSON file.** No concurrent modification protection beyond file locking. Do not edit it manually.
