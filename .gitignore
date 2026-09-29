@@ -7,3 +7,4 @@ build/
 tasks/
 agents/
 locks/
+config.json
