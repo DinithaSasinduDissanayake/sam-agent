@@ -71,6 +71,17 @@ def run(args):
                 installed.append(str(target_wrapper))
             # else: agy source missing — skip gracefully
 
+        # Install sam-tui dashboard (resolved states, archived hidden by
+        # default) from wrapper/sam-tui.py to bin/sam-tui.
+        tui_source = wrapper_dir / "sam-tui.py"
+        if not tui_source.is_file():
+            tui_source = (_SAM_PKG / "tui.py").resolve()
+        if tui_source.is_file():
+            tui_target = sam_config.bin_dir(sam_home) / "sam-tui"
+            shutil.copy2(str(tui_source), str(tui_target))
+            os.chmod(str(tui_target), 0o755)
+            installed.append(str(tui_target))
+
         target_wrapper = sam_config.wrapper_path(sam_home)
         result = {
             "status": "ok",
