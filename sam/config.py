@@ -13,7 +13,7 @@ from pathlib import Path
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 PI_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
-AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+AGY_DEFAULT_MODEL = "gemini-3.8-flash-low"
 
 DEFAULT_CONFIG = {
     "defaults": {
