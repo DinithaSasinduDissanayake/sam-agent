@@ -4,7 +4,11 @@
 Usage:
   ~/.sam/bin/sam-tui            Full-screen TUI (auto-refresh every 2s)
   ~/.sam/bin/sam-tui --once     Print once and exit (for scripts)
-  ~/.sam/bin/sam-tui --all      Include archived agents (hidden by default)
+  ~/.sam/bin/sam-tui --all      Show all agents newest-first (incl. archived, old)
+
+Default (recent) view: active (running/unknown <7d) + last 20
+completed/failed newest-first (created_at desc). Archived and
+terminals older than 7d are hidden unless --all.
 
 Keys:
   q  Quit
@@ -29,6 +33,8 @@ from rich.table import Table
 
 REGISTRY = os.path.expanduser("~/.sam/registry.json")
 REFRESH_SEC = 2
+RECENT_DAYS = 7
+RECENT_LIMIT = 20
 
 LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
           "no result.json (check logs/result). AGE = elapsed since created_at.")
@@ -85,24 +91,63 @@ def _fmt_state(state):
     return state or "?"
 
 
+def _age_days(entry):
+    dt = _parse_ts(entry.get("created_at"))
+    if dt is None:
+        return 0.0  # unknown age counts as recent (don't hide)
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    except Exception:
+        return 0.0
+
+
+def _sort_key(entry):
+    dt = _parse_ts(entry.get("created_at"))
+    if dt is None:
+        return ""
+    try:
+        return dt.isoformat()
+    except Exception:
+        return str(entry.get("created_at", ""))
+
+
 def _load_agents(show_archived=False):
     with open(REGISTRY) as f:
         data = json.load(f)
     agents = data.get("agents", [])
+    total = len(agents)
     if not show_archived:
         agents = [a for a in agents if not a.get("archived")]
+    unarchived_total = len(agents)
     resolved = []
     for a in agents:
         entry = dict(a)
         entry["resolved_state"] = _resolve(a)
         resolved.append(entry)
-    return resolved
+    if show_archived:
+        resolved.sort(key=_sort_key, reverse=True)
+        return resolved, total
+    # Recent default: active (running/unknown <7d) + last 20
+    # completed/failed newest-first (created_at desc).
+    active = [e for e in resolved
+              if e["resolved_state"] in ("running", "unknown")
+              and _age_days(e) < RECENT_DAYS]
+    terminals = [e for e in resolved
+                 if e["resolved_state"] in ("completed", "failed")]
+    terminals.sort(key=_sort_key, reverse=True)
+    recent_terminals = terminals[:RECENT_LIMIT]
+    seen = {id(e) for e in active}
+    shown = list(active) + [e for e in recent_terminals if id(e) not in seen]
+    shown.sort(key=_sort_key, reverse=True)
+    return shown, unarchived_total
 
 
 def build_dashboard(show_archived=False):
     """Read registry.json and return a rich Layout with summary + agent table."""
     try:
-        agents = _load_agents(show_archived)
+        agents, total = _load_agents(show_archived)
     except FileNotFoundError:
         return Panel("Waiting for registry.json to appear...", title="SAM Dashboard", border_style="yellow")
     except json.JSONDecodeError:
@@ -124,6 +169,8 @@ def build_dashboard(show_archived=False):
     if unknown:
         parts.append(f"  ? Unknown: [yellow]{len(unknown)}[/]")
     parts.append(f"  ━ Total: {len(agents)}")
+    mode = "all" if show_archived else "recent"
+    parts.append(f"  ━ Showing {len(agents)} of {total} ({mode})")
     summary = Panel("   ".join(parts), title="SAM Agents", border_style="blue")
 
     # ── Agent table: Agent State AGE Runs Harness Model ──
@@ -170,7 +217,7 @@ def build_dashboard(show_archived=False):
     # ── Layout ──
     layout = Layout()
     layout.split_column(
-        Layout(summary, size=3),
+        Layout(summary, size=4),
         Layout(table),
         Layout(Panel(LEGEND, border_style="dim"), size=3),
     )
