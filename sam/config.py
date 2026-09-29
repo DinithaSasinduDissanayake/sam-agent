@@ -12,9 +12,13 @@ from pathlib import Path
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
+PI_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
+AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+
 DEFAULT_CONFIG = {
     "defaults": {
-        "model": "opencode/muse-spark-1.3-contributor-free",
+        "model": PI_DEFAULT_MODEL,
+        "agy_model": AGY_DEFAULT_MODEL,
         "max_restarts": 5,
         "max_depth": 4,
         "harness": "pi",
@@ -121,6 +125,24 @@ def resolve_harness(args_harness=None, config: dict = None) -> str:
     return harness
 
 
+def resolve_model(args_model=None, harness: str = "pi", config: dict = None) -> str:
+    """Resolve model with precedence: CLI flag → $SAM_MODEL → per-harness default.
+
+    Per-harness default comes from config ``defaults``: ``agy_model`` when
+    harness is ``agy``, else ``model`` (pi default, backward-compatible).
+    Missing keys fall back to the hardcoded harness defaults.
+    """
+    if args_model:
+        return args_model
+    env_model = os.environ.get("SAM_MODEL")
+    if env_model:
+        return env_model
+    defaults = config.get("defaults", {}) if config else {}
+    if harness == "agy":
+        return defaults.get("agy_model") or defaults.get("model") or AGY_DEFAULT_MODEL
+    return defaults.get("model") or PI_DEFAULT_MODEL
+
+
 def bin_dir(sam_home: Path = None) -> Path:
     if sam_home is None:
         sam_home = get_sam_home()
@@ -223,6 +245,13 @@ def _validate_config(cfg: dict, cfg_path: Path) -> None:
                 f"Config key {' -> '.join(keys)} should be {expected_type.__name__}, "
                 f"got {type(value).__name__} ({value!r})"
             )
+    # Optional per-harness override: type-check only when present.
+    agy_model = cfg.get("defaults", {}).get("agy_model")
+    if agy_model is not None and not isinstance(agy_model, str):
+        raise ConfigCorrupt(
+            f"Config key defaults -> agy_model should be str, "
+            f"got {type(agy_model).__name__} ({agy_model!r})"
+        )
 
 
 # ── Directory initialization ──────────────────────────────────────────────────

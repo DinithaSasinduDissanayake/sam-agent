@@ -46,7 +46,7 @@ def generate_agent_id():
     return f"sam-{ts}-{suffix}"
 
 
-def validate_spawn_inputs(args, config):
+def validate_spawn_inputs(args, config, harness=None):
     name = args.name
     if name is None or not _NAME_RE.match(name):
         raise ValueError(f"name must match {_NAME_RE.pattern}, got {name!r}")
@@ -55,8 +55,10 @@ def validate_spawn_inputs(args, config):
     if not task.is_file():
         raise FileNotFoundError(f"task file not found: {task}")
 
-    model = (args.model or os.environ.get("SAM_MODEL") or
-             config.get("defaults", {}).get("model"))
+    if harness is None:
+        harness = sam_config.resolve_harness(getattr(args, "harness", None), config)
+    model = sam_config.resolve_model(
+        getattr(args, "model", None), harness, config)
     if not model:
         raise ValueError("no model configured")
 
@@ -122,7 +124,7 @@ def run(args):
             return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
         if effort and harness != "agy":
             return _emit_error(2, "--effort requires --harness agy", as_json)
-        inputs = validate_spawn_inputs(args, config)
+        inputs = validate_spawn_inputs(args, config, harness)
         depth = check_depth(config)
 
         name = inputs["name"]
