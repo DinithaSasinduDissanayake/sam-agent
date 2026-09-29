@@ -53,9 +53,15 @@ def load_registry():
         raise RegistryCorrupt("Registry agents must be a list")
 
     # Step 4: normalize archived flag (default false for pre-existing entries)
+    # Step 5: backfill harness for pre-harness entries (in-memory only;
+    # persisted only when caller saves via its resolved write-back path).
     for agent in data["agents"]:
         if isinstance(agent, dict):
             agent.setdefault("archived", False)
+            agent.setdefault(
+                "harness",
+                "agy" if agent.get("conversation_id") else "pi",
+            )
 
     return data
 

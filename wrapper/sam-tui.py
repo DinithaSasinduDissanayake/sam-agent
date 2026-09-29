@@ -151,7 +151,7 @@ def build_dashboard(show_archived=False):
         if runs is None:
             runs = a.get("run_id", "-")
 
-        harness = a.get("harness") or "-"
+        harness = a.get("harness") or ("agy" if a.get("conversation_id") else "pi")
 
         model = a.get("model", "") or ""
         if "/" in model:

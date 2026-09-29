@@ -667,7 +667,7 @@ def compute_agent_activity(agent, lifecycle_state,
     """
     from sam import harness as sam_harness  # lazy: harness delegates back here
     try:
-        h = sam_harness.get_harness((agent or {}).get("harness") or "pi")
+        h = sam_harness.get_harness(sam_harness.resolve_harness(agent))
         return h.activity(agent, lifecycle_state,
                           stall_seconds=stall_seconds, watch=watch,
                           max_bytes=max_bytes, now=now, sleep_fn=sleep_fn)

@@ -356,6 +356,21 @@ class AgyHarness(Harness):
 _HARNESSES = {"pi": PiHarness(), "agy": AgyHarness()}
 
 
+def resolve_harness(entry):
+    """Harness for a registry entry, with backfill for pre-harness rows.
+
+    Old entries lack the ``harness`` field; those with a conversation_id
+    are agy, everything else defaults to pi. Read-only fallback — callers
+    persist it only via their normal resolved write-back path.
+    """
+    entry = entry or {}
+    if entry.get("harness"):
+        return entry["harness"]
+    if entry.get("conversation_id"):
+        return "agy"
+    return "pi"
+
+
 def get_harness(name=None):
     """Return the harness instance for 'pi' (default) or 'agy'."""
     key = name or "pi"
