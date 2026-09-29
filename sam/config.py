@@ -172,6 +172,13 @@ def load_config(sam_home: Path = None) -> dict:
     if not isinstance(user_config, dict):
         raise ConfigCorrupt(f"Config file must contain a JSON object, got {type(user_config).__name__}")
 
+    # Missing top-level sections are corrupt (leaf keys are backfilled from defaults)
+    for section in ("defaults", "security"):
+        if section not in user_config or not isinstance(user_config[section], dict):
+            raise ConfigCorrupt(
+                f"Config at {cfg_path} is missing required key: {section}"
+            )
+
     # Merge with defaults: user values override, missing keys filled from DEFAULT_CONFIG
     merged = _deep_merge(dict(DEFAULT_CONFIG), user_config)
 
@@ -219,6 +226,14 @@ def _validate_config(cfg: dict, cfg_path: Path) -> None:
 
 
 # ── Directory initialization ──────────────────────────────────────────────────
+
+def save_config(data: dict, sam_home: Path = None) -> None:
+    """Atomically write config.json with mode 0o600. Thin wrapper over _write_file_atomic."""
+    if sam_home is None:
+        sam_home = get_sam_home()
+    path = config_path(sam_home)
+    _write_file_atomic(path=path, data=json.dumps(data, indent=2) + "\n", mode=0o600)
+
 
 def init_sam_home(sam_home: Path = None, force: bool = False) -> None:
     """Create the ~/.sam/ directory tree idempotently.

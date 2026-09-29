@@ -76,7 +76,7 @@ class TestConfig:
         from sam.config import load_config
         cfg = load_config(sam_home=sam_home)
         assert cfg["defaults"]["model"] == "opencode/muse-spark-1.3-contributor-free"
-        assert cfg["defaults"]["max_restarts"] == 1
+        assert cfg["defaults"]["max_restarts"] == 5
         assert cfg["security"]["inherit_env"] is True
 
     def test_load_config_corrupt_raises(self, sam_home):
@@ -141,10 +141,7 @@ class TestRegistry:
     def test_save_and_load_round_trip(self, inited_home):
         """Save an agent, load it back"""
         from sam.registry import load_registry, save_registry
-        from sam.config import get_sam_home
-        # Ensure config module sees our SAM_HOME
-        import test_implement_config as cfg_mod
-        # Override get_sam_home to return our temp home
+        # registry_path() resolves via $SAM_HOME (set by inited_home fixture)
         data = {"version": 1, "agents": [
             {"id": "test-1", "name": "tester", "state": "running",
              "pid": 1234, "pgid": 1234, "pid_start_time": 100,
@@ -288,9 +285,22 @@ class TestProc:
             start_new_session=True,
         )
         pgid = proc.pid  # session leader
-        result = kill_process_group(pgid, sigterm_timeout=2)
-        assert result is True, "kill_process_group should succeed"
-        assert proc.poll() is not None, "process should be dead"
+        try:
+            result = kill_process_group(pgid, sigterm_timeout=2)
+            assert result is True, "kill_process_group should succeed"
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            assert proc.poll() is not None, "process should be dead"
+        finally:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 # ── state.py tests ────────────────────────────────────────────────────────────

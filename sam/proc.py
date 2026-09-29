@@ -116,6 +116,20 @@ def pgid_of(pid):
         return None
 
 
+def _pid_is_zombie(pid):
+    """Return True if pid exists as a zombie (terminated, awaiting reap)."""
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            data = f.read()
+    except (FileNotFoundError, PermissionError):
+        return False
+    lp = data.rfind(")")
+    if lp == -1:
+        return False
+    parts = data[lp + 1:].strip().split()
+    return bool(parts) and parts[0] == "Z"
+
+
 def kill_process_group(pgid, sigterm_timeout=5):
     """Send SIGTERM to PGID, poll, escalate to SIGKILL if needed.
 
@@ -135,6 +149,8 @@ def kill_process_group(pgid, sigterm_timeout=5):
     while time.monotonic() < deadline:
         try:
             os.kill(pgid, 0)
+            if _pid_is_zombie(pgid):
+                return True  # terminated, awaiting parent reap
             time.sleep(0.2)
         except ProcessLookupError:
             return True  # Confirmed dead
@@ -154,6 +170,8 @@ def kill_process_group(pgid, sigterm_timeout=5):
     time.sleep(1.0)
     try:
         os.kill(pgid, 0)
+        if _pid_is_zombie(pgid):
+            return True
         return False  # Still alive (unlikely)
     except (ProcessLookupError, PermissionError):
         return True
