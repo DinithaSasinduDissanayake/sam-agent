@@ -86,7 +86,24 @@ def run(args):
                 return 0
 
             if current_state == "unknown":
-                return _emit_error(1, "process identity unknown, cannot kill safely", as_json)
+                # Archive unknowns: dead/recycled PID → mark killed, no signal (safe).
+                pid_u = agent.get("pid")
+                stored_u = agent.get("pid_start_time")
+                alive_u = sam_proc.proc_alive(pid_u) if pid_u else False
+                identity_ok = bool(pid_u and stored_u and alive_u and sam_proc.proc_start_time_match(pid_u, stored_u))
+                if not identity_ok:
+                    agent["state"] = "killed"
+                    agent["killed_reason"] = "unknown_stale"
+                    agent["updated_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                    sam_registry.save_registry(registry)
+                    if as_json:
+                        print(json.dumps({"status": "ok", "agent_id": agent_id,
+                              "outcome": "killed", "previous_state": "unknown"}))
+                    else:
+                        print(f"Killed agent {agent_id} (was unknown, PID dead/recycled, no signal sent)")
+                    return 0
+                # Live PID with matching identity despite unknown → fall through to normal kill.
 
             if current_state == "spawning" and agent.get("pid") is None:
                 return _emit_error(1, "agent not killable yet (still spawning)", as_json)

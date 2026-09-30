@@ -155,7 +155,7 @@ Terminate a running agent.
 sam kill <id-or-name>
 ```
 
-Sends SIGTERM → waits 5s → sends SIGKILL if needed.
+Sends SIGTERM → waits 5s → sends SIGKILL if needed. `sam kill <unknown>` marks dead-PID unknown as `killed` (no signal if proc dead/recycled).
 
 ### `sam logs`
 
@@ -188,7 +188,7 @@ continues; pi restarts use a fresh `run-NNN/session.jsonl`.
 ### `sam prune` / `sam unprune`
 
 Prune hides, never deletes. `sam prune` sets `archived=true` on terminal
-agents (directories, logs, results stay intact); `sam unprune` restores.
+agents + unknowns (unknown archived with reason stale; directories, logs, results stay intact); `sam unprune` restores.
 
 ```bash
 sam prune [id|--all]   # no args = all terminal

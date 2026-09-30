@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAM prune — Hide terminal agents (completed/failed/killed) via archived flag.
+"""SAM prune — Hide terminal agents (completed/failed/killed) + unknowns via archived flag.
 
 Step 4: prune never deletes. Sets archived=true on registry entries;
 never rmtree, never removes registry entries. Directories, logs and
@@ -54,7 +54,8 @@ def run(args):
                 if agent is None:
                     raise RuntimeError(f"agent not found: {ref}")
                 resolved = sam_state.resolve_agent_state(agent, agent.get("run_id", 1))
-                if resolved not in sam_state.TERMINAL_STATES:
+                is_unknown = (resolved == "unknown")
+                if resolved not in sam_state.TERMINAL_STATES and not is_unknown:
                     raise RuntimeError(f"agent {agent['id']} is not terminal (state={resolved})")
                 if agent.get("archived"):
                     if as_json:
@@ -64,15 +65,17 @@ def run(args):
                         print(f"Agent {agent['id']} already archived")
                     return 0
                 agent["archived"] = True
+                if is_unknown:
+                    agent["prune_reason"] = "stale"
                 agent["updated_at"] = now
                 sam_registry.save_registry(reg)
                 if as_json:
                     print(json.dumps({"status": "ok", "pruned": 1, "agent_id": agent["id"]}))
                 else:
-                    print(f"Archived agent {agent['id']}")
+                    print(f"Archived agent {agent['id']}" + (" (stale unknown)" if is_unknown else ""))
                 return 0
 
-            # --all or no args: archive all terminal, non-archived agents
+            # --all or no args: archive all terminal + unknowns, non-archived agents
             targets = []
             for a in agents:
                 if a.get("archived"):
@@ -81,7 +84,7 @@ def run(args):
                     resolved = sam_state.resolve_agent_state(a, a.get("run_id", 1))
                 except Exception:
                     resolved = a.get("state")
-                if resolved in sam_state.TERMINAL_STATES:
+                if resolved in sam_state.TERMINAL_STATES or resolved == "unknown":
                     targets.append(a)
             if not targets:
                 if as_json:
@@ -91,6 +94,12 @@ def run(args):
                 return 0
             for a in targets:
                 a["archived"] = True
+                try:
+                    r = sam_state.resolve_agent_state(a, a.get("run_id", 1))
+                except Exception:
+                    r = a.get("state")
+                if r == "unknown":
+                    a["prune_reason"] = "stale"
                 a["updated_at"] = now
             sam_registry.save_registry(reg)
             if as_json:
