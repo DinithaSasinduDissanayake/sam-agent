@@ -38,7 +38,8 @@ RECENT_LIMIT = 20
 
 LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
           "no result.json (check logs/result). AGE = since created_at; "
-          "DONE = since done (terminal) else -; LVL = thinking/effort.")
+          "DONE = since done (terminal) else -; "
+          "Model shows [thinking] (pi) or [effort:X] (agy, when overridden).")
 
 TERMINAL_STATES = frozenset({"completed", "failed", "killed"})
 
@@ -105,8 +106,22 @@ def _fmt_done(entry, state):
     return _fmt_dur(secs)
 
 
-def _fmt_lvl(entry):
-    return entry.get("thinking") or entry.get("effort") or "-"
+def _fmt_model(entry):
+    model = entry.get("model", "") or ""
+    if "/" in model:
+        model = model.split("/")[-1]
+    harness = entry.get("harness") or ("agy" if entry.get("conversation_id") else "pi")
+    if harness == "agy":
+        effort = entry.get("effort")
+        if effort:
+            suffix = model.rsplit("-", 1)[-1].lower() if "-" in model else ""
+            if suffix != str(effort).lower():
+                return f"{model} [effort:{effort}]"
+        return model
+    thinking = entry.get("thinking")
+    if thinking:
+        return f"{model} [{thinking}]"
+    return model
 
 
 def _fmt_state(state):
@@ -199,14 +214,13 @@ def build_dashboard(show_archived=False):
     parts.append(f"  ━ Showing {len(agents)} of {total} ({mode})")
     summary = Panel("   ".join(parts), title="SAM Agents", border_style="blue")
 
-    # ── Agent table: Agent State AGE DONE LVL Runs Harness Model ──
+    # ── Agent table: Agent State AGE DONE Runs Harness Model ──
     table = Table(box=None, padding=(0, 1))
     table.add_column("", width=2)  # status icon
     table.add_column("Agent", style="cyan", no_wrap=True)
     table.add_column("State")
     table.add_column("AGE", justify="right", no_wrap=True)
     table.add_column("DONE", justify="right", no_wrap=True)
-    table.add_column("LVL", no_wrap=True)
     table.add_column("Runs", justify="right")
     table.add_column("Harness", style="dim")
     table.add_column("Model", style="dim")
@@ -228,9 +242,7 @@ def build_dashboard(show_archived=False):
 
         harness = a.get("harness") or ("agy" if a.get("conversation_id") else "pi")
 
-        model = a.get("model", "") or ""
-        if "/" in model:
-            model = model.split("/")[-1]
+        model = _fmt_model(a)
 
         table.add_row(
             f"[{style}]{icon}[/]",
@@ -238,7 +250,6 @@ def build_dashboard(show_archived=False):
             f"[{style}]{_fmt_state(state)}[/]",
             _fmt_age(a),
             _fmt_done(a, state),
-            _fmt_lvl(a),
             str(runs),
             harness,
             model,
