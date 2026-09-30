@@ -1,3 +1,7 @@
+---
+name: sam
+description: Spawn/wait/read/kill background pi/agy sub-agents via SAM CLI. Use for parallel delegation, spawn-and-forget workers.
+---
 # SKILL.md — SAM: Sub-Agent Manager
 
 ## What is SAM?
