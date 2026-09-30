@@ -191,6 +191,7 @@ def run(args):
                         "root_id": root_id, "depth": depth,
                         "run_id": run_id, "model": model,
                         "harness": harness,
+                        "thinking": thinking, "effort": effort,
                         "state": "spawning", "pid": None, "pgid": None,
                         "pid_start_time": None,
                         "log_path": paths["log_path"],

@@ -37,7 +37,10 @@ RECENT_DAYS = 7
 RECENT_LIMIT = 20
 
 LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
-          "no result.json (check logs/result). AGE = elapsed since created_at.")
+          "no result.json (check logs/result). AGE = since created_at; "
+          "DONE = since done (terminal) else -; LVL = thinking/effort.")
+
+TERMINAL_STATES = frozenset({"completed", "failed", "killed"})
 
 
 def _resolve(agent):
@@ -61,13 +64,8 @@ def _parse_ts(value):
         return None
 
 
-def _fmt_age(entry):
-    dt = _parse_ts(entry.get("created_at"))
-    if dt is None:
-        return "-"
-    try:
-        secs = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
-    except Exception:
+def _fmt_dur(secs):
+    if secs < 0:
         return "-"
     if secs < 60:
         return "%ds" % secs
@@ -81,6 +79,34 @@ def _fmt_age(entry):
     days = hours // 24
     rem_h = hours % 24
     return "%dd%02dh" % (days, rem_h) if rem_h else "%dd" % days
+
+
+def _fmt_age(entry):
+    dt = _parse_ts(entry.get("created_at"))
+    if dt is None:
+        return "-"
+    try:
+        secs = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    except Exception:
+        return "-"
+    return _fmt_dur(secs)
+
+
+def _fmt_done(entry, state):
+    if state not in TERMINAL_STATES:
+        return "-"
+    dt = _parse_ts(entry.get("completed_at") or entry.get("updated_at"))
+    if dt is None:
+        return "-"
+    try:
+        secs = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    except Exception:
+        return "-"
+    return _fmt_dur(secs)
+
+
+def _fmt_lvl(entry):
+    return entry.get("thinking") or entry.get("effort") or "-"
 
 
 def _fmt_state(state):
@@ -173,12 +199,14 @@ def build_dashboard(show_archived=False):
     parts.append(f"  ━ Showing {len(agents)} of {total} ({mode})")
     summary = Panel("   ".join(parts), title="SAM Agents", border_style="blue")
 
-    # ── Agent table: Agent State AGE Runs Harness Model ──
+    # ── Agent table: Agent State AGE DONE LVL Runs Harness Model ──
     table = Table(box=None, padding=(0, 1))
     table.add_column("", width=2)  # status icon
     table.add_column("Agent", style="cyan", no_wrap=True)
     table.add_column("State")
-    table.add_column("AGE", justify="right")
+    table.add_column("AGE", justify="right", no_wrap=True)
+    table.add_column("DONE", justify="right", no_wrap=True)
+    table.add_column("LVL", no_wrap=True)
     table.add_column("Runs", justify="right")
     table.add_column("Harness", style="dim")
     table.add_column("Model", style="dim")
@@ -209,6 +237,8 @@ def build_dashboard(show_archived=False):
             a.get("name", "?"),
             f"[{style}]{_fmt_state(state)}[/]",
             _fmt_age(a),
+            _fmt_done(a, state),
+            _fmt_lvl(a),
             str(runs),
             harness,
             model,
