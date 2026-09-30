@@ -192,7 +192,7 @@ class TestStatus:
         """Status for non-existent agent should fail with code 1"""
         from sam.commands.status import run
         import argparse
-        args = argparse.Namespace(json=True, agent="nonexistent", name=None)
+        args = argparse.Namespace(json=True, id_or_name="nonexistent", name=None)
         code = run(args)
         assert code == 1
 
@@ -204,7 +204,7 @@ class TestKill:
         """Killing non-existent agent should fail with code 3"""
         from sam.commands.kill import run
         import argparse
-        args = argparse.Namespace(json=False, agent="nonexistent", name=None)
+        args = argparse.Namespace(json=False, id_or_name="nonexistent", name=None)
         code = run(args)
         assert code == 3
 
@@ -242,7 +242,7 @@ class TestRestart:
         """Restarting non-existent agent should fail with code 3"""
         from sam.commands.restart import run
         import argparse
-        args = argparse.Namespace(json=False, agent="nonexistent", name=None)
+        args = argparse.Namespace(json=False, id_or_name="nonexistent", name=None)
         code = run(args)
         assert code == 3
 
@@ -260,6 +260,6 @@ class TestRestart:
         spawn_run(spawn_args)
 
         # Now try to restart it (should fail since it's running)
-        args = argparse.Namespace(json=False, agent="restart-test", name=None)
+        args = argparse.Namespace(json=False, id_or_name="restart-test", name=None)
         code = run(args)
         assert code == 6

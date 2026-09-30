@@ -85,12 +85,14 @@ def run_sam_command(cmd, cwd=None, env=None):
     base_env = os.environ.copy()
     if env:
         base_env.update(env)
+    mod = "init_cmd" if cmd[0] == "init" else cmd[0]
+    args_repr = repr(cmd[1]) if isinstance(cmd[1], dict) else cmd[1]
     result = subprocess.run(
         [sys.executable, "-c",
          f"import sys; sys.path.insert(0, '{_PROJECT_DIR}'); "
-         f"from test_implement_{cmd[0]} import run; "
+         f"from sam.commands.{mod} import run; "
          f"import argparse; "
-         f"args = argparse.Namespace(**{json.dumps(cmd[1]) if isinstance(cmd[1], dict) else cmd[1]}); "
+         f"args = argparse.Namespace(**{args_repr}); "
          f"sys.exit(run(args))"],
         capture_output=True, text=True, cwd=cwd, env=base_env, timeout=30,
     )
@@ -156,13 +158,13 @@ class TestGoldenPath:
 
         # Step 3: status should show the agent
         code, out, err = run_sam_command(
-            ["status", {"json": True, "agent": agent_id, "name": None}],
+            ["status", {"json": True, "id_or_name": agent_id, "name": None}],
             env=env)
         assert code == 0, f"status failed: {err}"
 
         # Step 4: wait for completion
         code, out, err = run_sam_command(
-            ["wait", {"json": True, "agent": agent_id, "name": None,
+            ["wait", {"json": True, "id_or_name": agent_id, "name": None,
                        "timeout": 10}],
             env=env)
         assert code == 0, f"wait failed: {err}"
@@ -171,7 +173,7 @@ class TestGoldenPath:
 
         # Step 5: logs should show the agent's output
         code, out, err = run_sam_command(
-            ["logs", {"json": False, "agent": agent_id, "name": None,
+            ["logs", {"json": False, "id_or_name": agent_id, "name": None,
                        "follow": False, "raw": False, "n": 0}],
             env=env)
         assert code == 0, f"logs failed: {err}"
@@ -197,7 +199,7 @@ class TestGoldenPath:
         assert code == 0, f"spawn failed: {err}"
 
         code, out, err = run_sam_command(
-            ["wait", {"json": True, "agent": "fail-test", "name": None,
+            ["wait", {"json": True, "id_or_name": "fail-test", "name": None,
                        "timeout": 10}],
             env=env)
         assert code == 1, f"wait should return 1 for failure, got {code}"
@@ -222,7 +224,7 @@ class TestGoldenPath:
 
         # List all agents
         code, out, err = run_sam_command(
-            ["status", {"json": True, "agent": None, "name": None}],
+            ["status", {"json": True, "id_or_name": None, "name": None}],
             env=env)
         assert code == 0
         data = json.loads(out)
