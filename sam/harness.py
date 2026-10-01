@@ -479,6 +479,65 @@ class OpencodeHarness(Harness):
             return str(prev_session_path)
         return str(Path(new_run_dir) / "session.jsonl")
 
+    def activity(self, agent, lifecycle_state, stall_seconds=300,
+                 watch=None, max_bytes=256 * 1024, now=None, sleep_fn=None):
+        from sam import activity as act  # lazy: activity dispatches here
+        now = time.time() if now is None else now
+        spath = agent.get("session_path")
+        pointer = read_conversation_id(spath)
+        events = act.opencode_event_stats(agent.get("log_path"), now=now,
+                                          max_bytes=max_bytes)
+        pointer_exists = bool(spath) and os.path.isfile(str(spath))
+        session = {
+            "path": None if spath is None else str(spath),
+            "exists": bool(pointer_exists or events["events_found"]),
+            "size": 0, "mtime_age": None,
+            "harness": "opencode", "session_kind": "pointer",
+            "conversation_id": pointer,
+            "session_id": events["session_id"] or pointer,
+            "last_event_at": events["last_event_at"],
+            "last_event_age": events["last_event_age"],
+            "tool_pending": False, "pending_tool_call_ids": [],
+            "recent_event_count_5s": events["recent_event_count_5s"],
+            "recent_event_count_30s": events["recent_event_count_30s"],
+            "recent_event_bytes_5s": 0, "recent_event_bytes_30s": 0,
+            "usage_tokens_total": events["usage_tokens_total"],
+            "usage_tokens_5s": None, "usage_tokens_30s": None,
+            "usage_thinking_tokens_total": events["usage_reasoning_tokens_total"],
+            "usage_thinking_tokens_5s": None, "usage_thinking_tokens_30s": None,
+            "estimated_tokens_5s": None, "estimated_tokens_30s": None,
+            "parse_errors": 0, "truncated": events["truncated"],
+            "token_note": "opencode usage = sum of step_finish token counts in "
+                          "output.log (completed steps only); per-window token "
+                          "rates are not available.",
+        }
+        if pointer_exists:
+            try:
+                st = os.stat(str(spath))
+                session["size"] = st.st_size
+                session["mtime_age"] = max(0.0, now - st.st_mtime)
+            except OSError as e:
+                session["error"] = "stat failed: %s" % e
+        log = act.log_stats(agent.get("log_path"), now=now,
+                            max_bytes=max_bytes, tag="OPENCODE")
+        cls = act.classify(agent, lifecycle_state, session, log, now=now,
+                           stall_seconds=stall_seconds)
+        out = {"lifecycle_state": lifecycle_state,
+               "activity_state": cls["activity_state"],
+               "evidence": cls["evidence"],
+               "session": session, "log": log, "events": events}
+        if watch is not None:
+            interval = act.clamp_watch_seconds(watch)
+            deltas = act.watch_deltas(
+                {"session": agent.get("session_path"),
+                 "log": agent.get("log_path")}, interval, sleep_fn=sleep_fn)
+            out["watch"] = {
+                "interval_seconds": interval,
+                "note": "two-sample byte delta; growth_bytes is None when "
+                        "not measurable (missing/replaced/shrunk/error)",
+                "session": deltas["session"], "log": deltas["log"]}
+        return out
+
 
 _HARNESSES = {"pi": PiHarness(), "agy": AgyHarness(), "opencode": OpencodeHarness()}
 

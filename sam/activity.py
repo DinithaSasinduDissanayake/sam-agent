@@ -383,15 +383,18 @@ def session_stats(session_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
     return out
 
 
-def log_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
+def log_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES, tag="PI"):
     """Basic output.log stats: existence, size, mtime age, sentinel markers.
 
     Note: with the current buffered `pi --print` wrapper, output.log grows
     only at run start (BEGIN sentinel) and run end (final text + END
     sentinel), so mtime age here is a coarse signal, never claimed as live
     streaming. Read-only, never raises; carries "error" on failure.
+    ``tag`` selects the sentinel family (PI default; OPENCODE for opencode).
     """
     now = time.time() if now is None else now
+    sentinel_re = (_SENTINEL_RE if tag == "PI" else
+                   re.compile(r"^##%s_(BEGIN|END)_[a-f0-9]+$" % re.escape(tag)))
     out = {
         "path": None if log_path is None else str(log_path),
         "exists": False,
@@ -421,10 +424,10 @@ def log_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
         if not line:
             continue
         text = line.decode("utf-8", "replace")
-        if _SENTINEL_RE.match(text):
-            if text.startswith("##PI_BEGIN_"):
+        if sentinel_re.match(text):
+            if text.startswith("##%s_BEGIN_" % tag):
                 out["began"] = True
-            elif text.startswith("##PI_END_"):
+            elif text.startswith("##%s_END_" % tag):
                 out["ended"] = True
     return out
 
@@ -498,6 +501,103 @@ def agy_envelope_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
                           "progress unknown")
     else:
         out["warning"] = "log file missing"
+    return out
+
+
+_OC_SESSION_KEYS = ("sessionID", "sessionId", "session_id")
+_OC_TS_MS_THRESHOLD = 1e11
+
+
+def _oc_session_id(obj):
+    for holder in (obj, obj.get("part")):
+        if isinstance(holder, dict):
+            for key in _OC_SESSION_KEYS:
+                v = holder.get(key)
+                if isinstance(v, str) and v:
+                    return v
+    return None
+
+
+def opencode_event_stats(log_path, now=None, max_bytes=DEFAULT_MAX_BYTES):
+    """Read-only summary of opencode JSON events in the output.log tail.
+
+    `opencode run --format json` writes one JSON event per line as things
+    happen, so the newest event age is a real heartbeat. Timestamps may be
+    epoch milliseconds or seconds. Never raises.
+    """
+    now = time.time() if now is None else now
+    out = {
+        "path": None if log_path is None else str(log_path),
+        "events_found": False, "event_count": 0,
+        "last_event_type": None, "last_event_at": None, "last_event_age": None,
+        "recent_event_count_5s": 0, "recent_event_count_30s": 0,
+        "tool_events": 0, "step_finish_events": 0, "error_events": 0,
+        "session_id": None,
+        "usage_tokens_total": None, "usage_output_tokens_total": None,
+        "usage_reasoning_tokens_total": None,
+        "truncated": False, "warning": None,
+    }
+    if log_path is None:
+        out["warning"] = "no log_path in registry"
+        return out
+    try:
+        data, truncated = _read_tail(log_path, max_bytes)
+    except OSError as e:
+        out["warning"] = "read failed: %s" % e
+        return out
+    out["truncated"] = truncated
+    totals = {"total": 0, "output": 0, "reasoning": 0}
+    usage_seen = False
+    for raw in data.split(b"\n"):
+        line = raw.strip()
+        if not line.startswith(b"{"):
+            continue
+        try:
+            obj = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or not isinstance(obj.get("type"), str):
+            continue
+        etype = obj["type"]
+        out["event_count"] += 1
+        out["last_event_type"] = etype
+        ts = obj.get("timestamp")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            ts = ts / 1000.0 if ts > _OC_TS_MS_THRESHOLD else float(ts)
+            if out["last_event_at"] is None or ts > out["last_event_at"]:
+                out["last_event_at"] = ts
+            age = now - ts
+            if age <= WINDOW_5S:
+                out["recent_event_count_5s"] += 1
+            if age <= WINDOW_30S:
+                out["recent_event_count_30s"] += 1
+        if out["session_id"] is None:
+            out["session_id"] = _oc_session_id(obj)
+        if etype == "tool_use":
+            out["tool_events"] += 1
+        elif etype == "error":
+            out["error_events"] += 1
+        elif etype == "step_finish":
+            out["step_finish_events"] += 1
+            part = obj.get("part") if isinstance(obj.get("part"), dict) else {}
+            tok = part.get("tokens") if isinstance(part.get("tokens"), dict) else obj.get("tokens")
+            if isinstance(tok, dict):
+                usage_seen = True
+                for key in ("input", "output", "reasoning"):
+                    v = tok.get(key)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        totals["total"] += int(v)
+                        if key in ("output", "reasoning"):
+                            totals[key] += int(v)
+    out["events_found"] = out["event_count"] > 0
+    if out["last_event_at"] is not None:
+        out["last_event_age"] = max(0.0, now - out["last_event_at"])
+    if usage_seen:
+        out["usage_tokens_total"] = totals["total"]
+        out["usage_output_tokens_total"] = totals["output"]
+        out["usage_reasoning_tokens_total"] = totals["reasoning"]
+    if not out["events_found"]:
+        out["warning"] = "no opencode JSON events in log tail yet"
     return out
 
 
