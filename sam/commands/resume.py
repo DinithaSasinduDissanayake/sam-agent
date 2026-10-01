@@ -38,16 +38,7 @@ def run(args):
             return _emit(5, "agent identifier required", as_json)
 
         # Resolve agent
-        agent = None
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        if agent is None:
-            for a in agents:
-                if a.get("name") == ref:
-                    agent = a
-                    break
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit(3, f"agent not found: {ref}", as_json)
 
@@ -77,6 +68,18 @@ def run(args):
         infra_retry = bool(getattr(args, "_infra_retry", False))
         override_reason = (getattr(args, "override_reason", None) or "").strip() or None
         no_space = bool(getattr(args, "no_space", False))
+
+        # Pre-flight state check before launch gate / slot wait
+        resolved = sam_state.resolve_agent_state(
+            agent, agent.get("run_id", 1))
+        if resolved == "awaiting_retry" and not infra_retry:
+            item = _queued_retry(agent_id)
+            fires = _fmt_fires(item)
+            return _emit(5, f"already_queued{fires} "
+                            f"(sam retry to fire now, or --cancel)",
+                         as_json)
+        if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
+            return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
         gate_res = sam_proc.launch_gate(
             name=agent_name,

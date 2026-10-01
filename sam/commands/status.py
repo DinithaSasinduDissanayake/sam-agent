@@ -467,24 +467,7 @@ def run(args):
 
     if ref:
         # Single agent mode
-        agent = None
-        # Try exact ID first
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        # Try exact name
-        if agent is None:
-            matches = [a for a in agents if a.get("name") == ref]
-            # Among matches, prefer non-terminal
-            non_term = [a for a in matches if a.get("state") not in sam_state.TERMINAL_STATES]
-            if len(non_term) > 1:
-                return _emit_error(1, f"ambiguous name '{ref}'", as_json)
-            if non_term:
-                agent = non_term[0]
-            elif matches:
-                agent = matches[0]
-
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit_error(1, f"agent not found: {ref}", as_json)
 

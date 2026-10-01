@@ -48,16 +48,7 @@ def run(args):
         if ref is None:
             return _emit_error(3, "agent identifier required", as_json)
 
-        agent = None
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        if agent is None:
-            matches = [a for a in agents if a.get("name") == ref]
-            if matches:
-                agent = matches[0]
-
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit_error(3, f"agent not found: {ref}", as_json)
 
@@ -84,6 +75,11 @@ def run(args):
         no_space = bool(getattr(args, "no_space", False))
         model = agent.get("model", "")
         task_source = agent.get("task_path", "")
+
+        # Pre-flight state check before launch gate / slot wait
+        resolved = sam_state.resolve_agent_state(agent, agent.get("run_id", 1))
+        if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
+            return _emit_error(6, f"agent not terminal (state={resolved})", as_json)
 
         gate_res = sam_proc.launch_gate(
             name=target_name,

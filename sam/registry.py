@@ -144,6 +144,46 @@ def find_by_id(agents, agent_id):
     return None
 
 
+def resolve_ref(agents, ref):
+    """Resolve an agent reference (ID or name) against the agents list.
+
+    1. Exact ID match takes precedence.
+    2. For name matches:
+       - Prefers non-terminal agents by *resolved* state.
+       - Then prefers the newest agent by created_at / run_started_at / position.
+    Returns matching agent dict or None.
+    """
+    if not ref or not agents:
+        return None
+
+    # 1. Exact ID match
+    for a in agents:
+        if a.get("id") == ref:
+            return a
+
+    # 2. Name matches
+    matches = [a for a in agents if a.get("name") == ref]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    from sam import state as sam_state
+
+    def _sort_key(item):
+        idx, a = item
+        run_id = a.get("run_id") or a.get("run_count") or 1
+        try:
+            resolved = sam_state.resolve_agent_state(a, run_id)
+            is_non_terminal = (resolved not in sam_state.TERMINAL_STATES and resolved != "unknown")
+        except Exception:
+            is_non_terminal = (a.get("state") not in sam_state.TERMINAL_STATES)
+        ts = a.get("created_at") or a.get("run_started_at") or a.get("completed_at") or ""
+        return (1 if is_non_terminal else 0, ts, run_id, idx)
+
+    return max(enumerate(matches), key=_sort_key)[1]
+
+
 def find_active_by_name(agents, name, terminal_states):
     """
     Line 1: Return a list of agent dicts where agent["name"] == name

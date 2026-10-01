@@ -56,13 +56,7 @@ def _fmt_ts(ts):
 
 def _resolve_agent(ref):
     reg = sam_registry.load_registry()
-    for a in reg.get("agents", []):
-        if a.get("id") == ref:
-            return a
-    for a in reg.get("agents", []):
-        if a.get("name") == ref:
-            return a
-    return None
+    return sam_registry.resolve_ref(reg.get("agents", []), ref)
 
 
 def _clear_queue_fields(agent_id):
