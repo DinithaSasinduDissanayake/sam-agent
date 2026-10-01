@@ -175,6 +175,7 @@ def run(args):
         # defers while a queued retry's advisory window is open. The
         # queued retry itself never routes through this gate. "Resets in"
         # is weather — overridable with a logged reason.
+        sam_retry.reconcile_pending()
         quota_window = None if override_reason else sam_retry.active_window(model)
         if quota_window is not None:
             retry_after = max(1, int(quota_window - time.time() + 0.5))

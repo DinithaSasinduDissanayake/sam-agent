@@ -54,7 +54,7 @@ def _writeback_terminals(updates):
                 rid = updates.get(a.get("id"))
                 if rid is None:
                     continue
-                if rid == "failed" and a.get("state") != "failed":
+                if (rid == "failed" or a.get("state") == "failed"):
                     promoted, item = sam_retry.promote_if_infra(a)
                     if promoted and item is not None:
                         rid = "awaiting_retry"

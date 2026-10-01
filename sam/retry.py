@@ -252,3 +252,116 @@ def promote_if_infra(agent_entry, result_path=None, log_path=None):
         reset_advisory_s=reset_s,
         reason=err_text[:200] or kind)
     return True, item
+
+
+def reconcile_terminal(agent_id, snap_run_id=None, snap_pid=None, terminal_state=None):
+    """Reconcile an agent's terminal state under the registry lock.
+
+    If result.json (or log) indicates an infra failure (429 or startup network death),
+    promotes the agent to awaiting_retry and enqueues it.
+    Updates the registry with exit_code, duration_ms, and the terminal state.
+    Returns (final_state, queue_item).
+    """
+    from sam import locks as sam_locks
+    from sam import registry as sam_registry
+    from sam import state as sam_state
+    from datetime import datetime, timezone
+
+    with sam_locks.registry_lock(exclusive=True, timeout=10):
+        reg = sam_registry.load_registry()
+        target = None
+        for a in reg.get("agents", []):
+            if a.get("id") == agent_id:
+                target = a
+                break
+        if not target:
+            return None, None
+
+        if snap_run_id is not None and target.get("run_id") != snap_run_id:
+            return target.get("state"), find_for(agent_id)
+        if snap_pid is not None and target.get("pid") != snap_pid:
+            return target.get("state"), find_for(agent_id)
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        res_path = target.get("result_path")
+        res_data = None
+        if res_path and os.path.exists(res_path):
+            try:
+                with open(res_path, "r", encoding="utf-8") as f:
+                    res_data = json.load(f)
+                if isinstance(res_data, dict):
+                    target["exit_code"] = res_data.get("exit_code")
+                    target["duration_ms"] = res_data.get("duration_ms")
+            except Exception:
+                pass
+
+        # Check for infra failure promotion first
+        promoted, item = promote_if_infra(target)
+        if promoted and item is not None:
+            target["state"] = "awaiting_retry"
+            target["retry_not_before"] = item["not_before"]
+            target["retry_kind"] = item.get("kind")
+            target["updated_at"] = now_str
+            sam_registry.save_registry(reg)
+            return "awaiting_retry", item
+
+        # Otherwise resolve terminal state
+        resolved = terminal_state
+        if resolved is None:
+            run_id = target.get("run_id") or target.get("run_count") or 1
+            resolved = sam_state.resolve_agent_state(target, run_id)
+        if resolved in sam_state.TERMINAL_STATES:
+            target["state"] = resolved
+            target["updated_at"] = now_str
+            sam_registry.save_registry(reg)
+            return resolved, None
+
+        sam_registry.save_registry(reg)
+        return target.get("state"), None
+
+
+def reconcile_pending():
+    """Reconcile non-terminal or unpromoted failed agents whose result.json exists.
+
+    Promotes any infra deaths to awaiting_retry and enqueues them,
+    so the circuit breaker (active_window) sees them before new spawns.
+    Returns list of (name, not_before) promotions.
+    """
+    from sam import locks as sam_locks
+    from sam import registry as sam_registry
+    from datetime import datetime, timezone
+
+    promotions = []
+    try:
+        with sam_locks.registry_lock(exclusive=True, timeout=10):
+            reg = sam_registry.load_registry()
+            dirty = False
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for a in reg.get("agents", []):
+                state = a.get("state")
+                # Look for agents that are not yet marked awaiting_retry
+                if state in ("running", "spawning", "failed"):
+                    rp = a.get("result_path")
+                    if rp and os.path.exists(rp):
+                        try:
+                            with open(rp, "r", encoding="utf-8") as f:
+                                rdata = json.load(f)
+                            if isinstance(rdata, dict):
+                                a["exit_code"] = rdata.get("exit_code")
+                                a["duration_ms"] = rdata.get("duration_ms")
+                        except Exception:
+                            pass
+                        promoted, item = promote_if_infra(a)
+                        if promoted and item is not None:
+                            a["state"] = "awaiting_retry"
+                            a["retry_not_before"] = item["not_before"]
+                            a["retry_kind"] = item.get("kind")
+                            a["updated_at"] = now_str
+                            promotions.append((a.get("name"), item.get("not_before")))
+                            dirty = True
+            if dirty:
+                sam_registry.save_registry(reg)
+    except Exception:
+        pass
+    return promotions
+
