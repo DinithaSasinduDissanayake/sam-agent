@@ -38,7 +38,7 @@ STRIP_ENV_VARS = ("SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY")
 def build_child_env(agent_id, model, depth, harness=None):
     """Build child process environment for sub-agent.
 
-    Sets SAM_AGENT_ID, SAM_MODEL, SAM_DEPTH, SAM_PARENT_ID, SAM_ROOT_ID.
+    Sets SAM_AGENT_ID, SAM_MODEL, SAM_MODEL_HARNESS, SAM_DEPTH, SAM_PARENT_ID, SAM_ROOT_ID.
     Strips interactive SSH markers (SSH_CLIENT, SSH_CONNECTION, SSH_TTY) so
     headless harnesses do not prompt for re-auth. Preserves SSH_AUTH_SOCK.
     Ensures DBUS_SESSION_BUS_ADDRESS points to user bus if available.
@@ -52,6 +52,10 @@ def build_child_env(agent_id, model, depth, harness=None):
             env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={uid_bus}"
     env["SAM_AGENT_ID"] = agent_id
     env["SAM_MODEL"] = model
+    if harness:
+        env["SAM_MODEL_HARNESS"] = harness
+    else:
+        env.pop("SAM_MODEL_HARNESS", None)
     env["SAM_DEPTH"] = str(depth + 1)
     spawner_id = os.environ.get("SAM_AGENT_ID")
     env["SAM_PARENT_ID"] = spawner_id or ""

@@ -266,7 +266,7 @@ def run(args):
             elif thinking:
                 argv.extend(["--thinking", thinking])
 
-            env = build_child_env(agent_id, model, depth)
+            env = build_child_env(agent_id, model, depth, harness=harness)
             proc = subprocess.Popen(
                 argv, cwd=cwd, env=env,
                 stdin=subprocess.DEVNULL,

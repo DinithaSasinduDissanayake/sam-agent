@@ -14,11 +14,14 @@ from pathlib import Path
 
 PI_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
 AGY_DEFAULT_MODEL = "gemini-3.8-flash-low"
+# Free models that only work through the OpenCode CLI (discovery D8).
+OPENCODE_DEFAULT_MODEL = "opencode/mimo-v2.6-flash-free"
 
 DEFAULT_CONFIG = {
     "defaults": {
         "model": PI_DEFAULT_MODEL,
         "agy_model": AGY_DEFAULT_MODEL,
+        "opencode_model": OPENCODE_DEFAULT_MODEL,
         "max_restarts": 5,
         "max_depth": 4,
         "harness": "pi",
@@ -34,7 +37,7 @@ LOCK_FILENAME = "registry.lock"
 LOCKS_DIRNAME = "locks"
 BIN_DIRNAME = "bin"
 WRAPPER_FILENAME = "pi-wrapper"
-HARNESS_WRAPPERS = {"pi": "pi-wrapper", "agy": "agy-wrapper"}
+HARNESS_WRAPPERS = {"pi": "pi-wrapper", "agy": "agy-wrapper", "opencode": "opencode-wrapper"}
 AGENTS_DIRNAME = "agents"
 TASKS_DIRNAME = "tasks"
 EVENTS_FILENAME = "events.log"
@@ -129,18 +132,24 @@ def resolve_harness(args_harness=None, config: dict = None) -> str:
 def resolve_model(args_model=None, harness: str = "pi", config: dict = None) -> str:
     """Resolve model with precedence: CLI flag → $SAM_MODEL → per-harness default.
 
-    Per-harness default comes from config ``defaults``: ``agy_model`` when
-    harness is ``agy``, else ``model`` (pi default, backward-compatible).
-    Missing keys fall back to the hardcoded harness defaults.
+    $SAM_MODEL is ignored when $SAM_MODEL_HARNESS names a different harness
+    (a child of an agy worker must not hand a gemini model to opencode).
+    Per-harness default comes from config ``defaults``: ``agy_model`` for agy
+    (falls back to ``model``), ``opencode_model`` for opencode (never falls
+    back to pi's ``model``), else ``model`` (pi). Missing keys fall back to
+    the hardcoded harness defaults.
     """
     if args_model:
         return args_model
     env_model = os.environ.get("SAM_MODEL")
-    if env_model:
+    env_model_harness = os.environ.get("SAM_MODEL_HARNESS")
+    if env_model and (not env_model_harness or env_model_harness == harness):
         return env_model
     defaults = config.get("defaults", {}) if config else {}
     if harness == "agy":
         return defaults.get("agy_model") or defaults.get("model") or AGY_DEFAULT_MODEL
+    if harness == "opencode":
+        return defaults.get("opencode_model") or OPENCODE_DEFAULT_MODEL
     return defaults.get("model") or PI_DEFAULT_MODEL
 
 
@@ -270,13 +279,14 @@ def _validate_config(cfg: dict, cfg_path: Path) -> None:
                 f"Config key {' -> '.join(keys)} should be {expected_type.__name__}, "
                 f"got {type(value).__name__} ({value!r})"
             )
-    # Optional per-harness override: type-check only when present.
-    agy_model = cfg.get("defaults", {}).get("agy_model")
-    if agy_model is not None and not isinstance(agy_model, str):
-        raise ConfigCorrupt(
-            f"Config key defaults -> agy_model should be str, "
-            f"got {type(agy_model).__name__} ({agy_model!r})"
-        )
+    # Optional per-harness overrides: type-check only when present.
+    for key in ("agy_model", "opencode_model"):
+        value = cfg.get("defaults", {}).get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigCorrupt(
+                f"Config key defaults -> {key} should be str, "
+                f"got {type(value).__name__} ({value!r})"
+            )
 
 
 # ── Directory initialization ──────────────────────────────────────────────────

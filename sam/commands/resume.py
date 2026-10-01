@@ -224,7 +224,7 @@ def run(args):
         )
 
         parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
-        env = sam_util.build_child_env(agent_id, model, parent_depth)
+        env = sam_util.build_child_env(agent_id, model, parent_depth, harness=harness)
         cwd = agent.get("cwd", os.getcwd())
 
         try:
