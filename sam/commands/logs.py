@@ -19,7 +19,7 @@ if str(_SAM_PKG) not in sys.path:
 from sam import registry as sam_registry
 from sam import state as sam_state
 
-_SENTINEL_RE = re.compile(r"^##(PI|AGY)_(BEGIN|END)_[a-f0-9]+$")
+_SENTINEL_RE = re.compile(r"^##(PI|AGY|OPENCODE)_(BEGIN|END)_[a-f0-9]+$")
 
 
 def _emit_error(code, message, as_json):

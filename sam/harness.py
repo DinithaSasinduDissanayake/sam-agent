@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAM harness module — native dual-harness interface (pi + agy).
+"""SAM harness module — native multi-harness interface (pi + agy + opencode).
 
 Approved refactor: one ``Harness`` interface with ``spawn`` / ``poll`` /
 ``result`` / ``logs`` / ``resume`` (``resume_session``) / ``activity``
@@ -57,9 +57,38 @@ RESULT_FIELDS = (
 )
 
 # Legacy keys wrappers keep emitting for backward compatibility.
-LEGACY_RESULT_FIELDS = ("started_at", "ended_at", "output_path", "task_path")
+_SENTINEL_RE = re.compile(r"^##(PI|AGY|OPENCODE)_(BEGIN|END)_[a-f0-9]+$")
 
-_SENTINEL_RE = re.compile(r"^##(PI|AGY)_(BEGIN|END)_[a-f0-9]+$")
+#: SAM ``--effort`` values accepted for the opencode harness; the wrapper
+#: passes them unchanged to ``opencode run --variant <value>``.
+OPENCODE_EFFORTS = ("minimal", "low", "medium", "high", "max")
+
+#: Discovery D6. True: ``sam resume`` continues the opencode session via
+#: ``opencode run --session <id>``. False: ``sam resume`` is refused for
+#: opencode (spawn a new agent instead); infra retries then always start fresh.
+OPENCODE_RESUME_SUPPORTED = True
+
+
+def validate_reasoning_flags(harness, thinking=None, effort=None):
+    """Return None when --thinking/--effort are valid for ``harness``.
+
+    Otherwise return the exact user-facing error message; callers exit 2.
+    """
+    if harness == "agy":
+        if thinking:
+            return "--thinking cannot be used with --harness agy; use --effort"
+        return None
+    if harness == "opencode":
+        if thinking:
+            return "--thinking cannot be used with --harness opencode; use --effort"
+        if effort and effort not in OPENCODE_EFFORTS:
+            return ("--effort for --harness opencode must be one of: "
+                    + ", ".join(OPENCODE_EFFORTS))
+        return None
+    if effort:
+        return "--effort requires --harness agy or --harness opencode"
+    return None
+
 
 
 def build_result(agent_id, harness, exit_code=None, exit_signal=None,
@@ -411,7 +440,47 @@ class AgyHarness(Harness):
         return out
 
 
-_HARNESSES = {"pi": PiHarness(), "agy": AgyHarness()}
+class OpencodeHarness(Harness):
+    """OpenCode harness: ``opencode run --format json`` event stream.
+
+    The session "file" is a pointer holding the opencode session id; the
+    wrapper writes it as soon as the first event names the session.
+    Continuation happens only when the wrapper gets ``--resume``
+    (``sam resume``, or an infra retry when a session id was recorded).
+    Restart always starts a fresh session on the same task.
+    """
+
+    name = "opencode"
+    sentinel_tag = "OPENCODE"
+    session_kind = "pointer"
+
+    def build_argv(self, wrapper, agent_id, model, session_path,
+                   task_path, result_path, thinking=None, effort=None, resume=False):
+        if thinking:
+            raise ValueError(
+                "--thinking cannot be used with harness 'opencode'; use --effort")
+        if effort and effort not in OPENCODE_EFFORTS:
+            raise ValueError(
+                "--effort for harness 'opencode' must be one of %s"
+                % ", ".join(OPENCODE_EFFORTS))
+        argv = [str(wrapper), "--agent-id", agent_id, "--model", model,
+                "--session", str(session_path), "--task", str(task_path),
+                "--result", str(result_path)]
+        if effort:
+            argv.extend(["--effort", effort])
+        if resume:
+            argv.append("--resume")
+        return argv
+
+    def resume_session(self, prev_session_path, new_run_dir, for_resume=False):
+        # resume / infra retry: keep the pointer path (continued, or
+        # overwritten by a fresh run). restart: fresh pointer per run.
+        if for_resume and prev_session_path:
+            return str(prev_session_path)
+        return str(Path(new_run_dir) / "session.jsonl")
+
+
+_HARNESSES = {"pi": PiHarness(), "agy": AgyHarness(), "opencode": OpencodeHarness()}
 
 
 def resolve_harness(entry):
@@ -430,10 +499,11 @@ def resolve_harness(entry):
 
 
 def get_harness(name=None):
-    """Return the harness instance for 'pi' (default) or 'agy'."""
+    """Return the harness instance for 'pi' (default), 'agy' or 'opencode'."""
     key = name or "pi"
     try:
         return _HARNESSES[key]
     except KeyError:
         raise ValueError(
             "unknown harness %r, expected one of %s" % (name, sorted(_HARNESSES)))
+
