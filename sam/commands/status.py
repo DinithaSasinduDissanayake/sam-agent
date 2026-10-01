@@ -63,7 +63,7 @@ def _writeback_terminals(updates):
                         continue
                 else:
                     rid = val
-                if (rid == "failed" or a.get("state") == "failed"):
+                if rid == "failed" and a.get("state") in ("running", "spawning", "unknown"):
                     promoted, item = sam_retry.promote_if_infra(a)
                     if promoted and item is not None:
                         rid = "awaiting_retry"

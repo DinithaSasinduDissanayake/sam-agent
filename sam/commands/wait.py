@@ -200,7 +200,6 @@ def run(args):
             out = {
                 "status": "awaiting_retry",
                 "agent_id": agent_id,
-                "exit_code": 0,
                 "result": result_dict,
                 "elapsed_seconds": elapsed,
                 "retry_not_before": retry_item.get("not_before") if isinstance(retry_item, dict) else None,
@@ -209,7 +208,7 @@ def run(args):
             if as_json:
                 print(json.dumps(out))
             else:
-                print(f"Agent {agent_id} awaiting_retry (exit 0, {elapsed}s)")
+                print(f"Agent {agent_id} awaiting_retry ({elapsed}s)")
             return 0
 
         if current_state == "failed":

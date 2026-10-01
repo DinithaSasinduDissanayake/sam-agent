@@ -38,6 +38,7 @@ HARNESS_WRAPPERS = {"pi": "pi-wrapper", "agy": "agy-wrapper"}
 AGENTS_DIRNAME = "agents"
 TASKS_DIRNAME = "tasks"
 EVENTS_FILENAME = "events.log"
+EPOCH_FILENAME = ".reconcile_epoch"
 
 # Required keys for validation
 REQUIRED_CONFIG_KEYS = {
@@ -159,6 +160,30 @@ def tasks_dir(sam_home: Path = None) -> Path:
     if sam_home is None:
         sam_home = get_sam_home()
     return sam_home / TASKS_DIRNAME
+
+
+def reconcile_epoch_path(sam_home: Path = None) -> Path:
+    if sam_home is None:
+        sam_home = get_sam_home()
+    return sam_home / EPOCH_FILENAME
+
+
+def get_reconcile_epoch(sam_home: Path = None):
+    """Return UTC datetime of reconcile epoch marker if present, else None."""
+    path = reconcile_epoch_path(sam_home)
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+        from datetime import datetime, timezone
+        from sam import run_times as sam_run_times
+        dt = sam_run_times.parse_timestamp(content)
+        if dt is not None:
+            return dt
+        mtime = path.stat().st_mtime
+        return datetime.fromtimestamp(mtime, timezone.utc)
+    except Exception:
+        return None
 
 
 # ── Config loading ────────────────────────────────────────────────────────────
@@ -289,6 +314,12 @@ def init_sam_home(sam_home: Path = None, force: bool = False) -> None:
             data=json.dumps(DEFAULT_CONFIG, indent=2) + "\n",
             mode=0o600,
         )
+
+    epoch_p = reconcile_epoch_path(sam_home)
+    if force or not epoch_p.exists():
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write_file_atomic(path=epoch_p, data=now_iso + "\n", mode=0o600)
 
 
 def _ensure_dir(path: Path, mode: int) -> None:

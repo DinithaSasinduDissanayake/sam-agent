@@ -238,9 +238,12 @@ def promote_if_infra(agent_entry, result_path=None, log_path=None):
 
     Idempotent: returns the existing queue item when already queued.
     Returns (True, item) on promotion/already-queued, (False, None) when
-    the failure is not infra.
+    the failure is not infra or promotion is guarded.
     """
-    if agent_entry.get("state") == "awaiting_retry":
+    stored_state = agent_entry.get("state")
+    if stored_state in ("failed", "killed", "completed", "partial", "retry_cancelled"):
+        return False, None
+    if stored_state == "awaiting_retry":
         item = find_for(agent_entry.get("id"))
         return (item is not None), item
     rp = result_path or agent_entry.get("result_path")
@@ -251,6 +254,41 @@ def promote_if_infra(agent_entry, result_path=None, log_path=None):
                 result = json.load(f)
     except (OSError, ValueError):
         return False, None
+
+    # Recency guard & migration epoch check
+    now = time.time()
+    ended_ts = None
+    if isinstance(result, dict) and result.get("ended_at") is not None:
+        from sam import run_times as sam_run_times
+        dt = sam_run_times.parse_timestamp(result.get("ended_at"))
+        if dt is not None:
+            ended_ts = dt.timestamp()
+    if ended_ts is None and rp and os.path.exists(rp):
+        try:
+            ended_ts = os.path.getmtime(rp)
+        except OSError:
+            pass
+
+    # Recency guard: must have ended within the last 2 hours (7200 seconds)
+    if ended_ts is not None and (now - ended_ts > 7200):
+        return False, None
+
+    # Migration epoch: runs created or ended before epoch are skipped
+    from sam import config as sam_config
+    epoch_dt = sam_config.get_reconcile_epoch()
+    if epoch_dt is not None:
+        epoch_ts = epoch_dt.timestamp()
+        if ended_ts is not None:
+            if ended_ts < epoch_ts:
+                return False, None
+        else:
+            created_at = agent_entry.get("created_at")
+            if created_at:
+                from sam import run_times as sam_run_times
+                cdt = sam_run_times.parse_timestamp(created_at)
+                if cdt is not None and cdt.timestamp() < epoch_ts:
+                    return False, None
+
     log_text = None
     lp = log_path or agent_entry.get("log_path")
     try:
@@ -324,15 +362,17 @@ def reconcile_terminal(agent_id, snap_run_id=None, snap_pid=None, terminal_state
             except Exception:
                 pass
 
-        # Check for infra failure promotion first
-        promoted, item = promote_if_infra(target)
-        if promoted and item is not None:
-            target["state"] = "awaiting_retry"
-            target["retry_not_before"] = item["not_before"]
-            target["retry_kind"] = item.get("kind")
-            target["updated_at"] = now_str
-            sam_registry.save_registry(reg)
-            return "awaiting_retry", item
+        # Check for infra failure promotion first, ONLY for non-terminal stored states
+        stored_state = target.get("state")
+        if stored_state in ("running", "spawning", "unknown"):
+            promoted, item = promote_if_infra(target)
+            if promoted and item is not None:
+                target["state"] = "awaiting_retry"
+                target["retry_not_before"] = item["not_before"]
+                target["retry_kind"] = item.get("kind")
+                target["updated_at"] = now_str
+                sam_registry.save_registry(reg)
+                return "awaiting_retry", item
 
         # Otherwise resolve terminal state
         resolved = terminal_state
@@ -350,7 +390,7 @@ def reconcile_terminal(agent_id, snap_run_id=None, snap_pid=None, terminal_state
 
 
 def reconcile_pending():
-    """Reconcile non-terminal or unpromoted failed agents whose result.json exists.
+    """Reconcile non-terminal agents whose result.json exists.
 
     Promotes any infra deaths to awaiting_retry and enqueues them,
     so the circuit breaker (active_window) sees them before new spawns.
@@ -362,32 +402,47 @@ def reconcile_pending():
 
     promotions = []
     try:
+        candidates = []
+        with sam_locks.registry_lock(exclusive=False, timeout=10):
+            reg = sam_registry.load_registry()
+            for a in reg.get("agents", []):
+                state = a.get("state")
+                rp = a.get("result_path")
+                if state in ("running", "spawning") or (state == "unknown" and rp and os.path.exists(rp)):
+                    if rp and os.path.exists(rp):
+                        candidates.append(a.get("id"))
+
+        if not candidates:
+            return promotions
+
         with sam_locks.registry_lock(exclusive=True, timeout=10):
             reg = sam_registry.load_registry()
             dirty = False
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for a in reg.get("agents", []):
+                if a.get("id") not in candidates:
+                    continue
                 state = a.get("state")
-                # Look for agents that are not yet marked awaiting_retry
-                if state in ("running", "spawning", "failed"):
-                    rp = a.get("result_path")
-                    if rp and os.path.exists(rp):
-                        try:
-                            with open(rp, "r", encoding="utf-8") as f:
-                                rdata = json.load(f)
-                            if isinstance(rdata, dict):
-                                a["exit_code"] = rdata.get("exit_code")
-                                a["duration_ms"] = rdata.get("duration_ms")
-                        except Exception:
-                            pass
-                        promoted, item = promote_if_infra(a)
-                        if promoted and item is not None:
-                            a["state"] = "awaiting_retry"
-                            a["retry_not_before"] = item["not_before"]
-                            a["retry_kind"] = item.get("kind")
-                            a["updated_at"] = now_str
-                            promotions.append((a.get("name"), item.get("not_before")))
-                            dirty = True
+                if state not in ("running", "spawning", "unknown"):
+                    continue
+                rp = a.get("result_path")
+                if rp and os.path.exists(rp):
+                    try:
+                        with open(rp, "r", encoding="utf-8") as f:
+                            rdata = json.load(f)
+                        if isinstance(rdata, dict):
+                            a["exit_code"] = rdata.get("exit_code")
+                            a["duration_ms"] = rdata.get("duration_ms")
+                    except Exception:
+                        pass
+                    promoted, item = promote_if_infra(a)
+                    if promoted and item is not None:
+                        a["state"] = "awaiting_retry"
+                        a["retry_not_before"] = item["not_before"]
+                        a["retry_kind"] = item.get("kind")
+                        a["updated_at"] = now_str
+                        promotions.append((a.get("name"), item.get("not_before")))
+                        dirty = True
             if dirty:
                 sam_registry.save_registry(reg)
     except Exception:

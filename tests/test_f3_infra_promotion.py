@@ -92,7 +92,7 @@ def test_wait_promotes_429_to_awaiting_retry(sam_env, capsys):
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert data["status"] == "awaiting_retry"
-    assert data["exit_code"] == 0
+    assert "exit_code" not in data
 
     # Registry assertion
     reg = sam_registry.load_registry()
