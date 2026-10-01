@@ -704,8 +704,10 @@ def _apply_proc_liveness(out, agent, stall_seconds=DEFAULT_STALL_SECONDS,
                         % (" + pgid" if liv.get("pgid_match") else ""))
         if out.get("activity_state") != "silent":
             return out
+        pgid = agent.get("pgid")
         delta = sam_proc.resource_delta(pid, RESOURCE_PROBE_S,
-                                        sleep_fn=sleep_fn)
+                                        sleep_fn=sleep_fn, pgid=pgid)
+        out["resource_delta"] = delta
         if delta is None:
             evidence.append("resource probe: unavailable (process gone?)")
         else:
@@ -830,6 +832,13 @@ def summarize_liveness(act):
         if state == "silent":
             if proc_ok is False:
                 return {"verdict": "unknown", "signal": "proc", "age": None}
+            res_delta = act.get("resource_delta")
+            if res_delta and res_delta.get("moving"):
+                cpu_n = res_delta.get("cpu_ticks", 0)
+                return {"verdict": f"alive, moving (cpu +{cpu_n})", "signal": "no task signal", "age": None}
+            elif res_delta:
+                interval = int(round(res_delta.get("interval_seconds", 1.0)))
+                return {"verdict": f"alive, no movement for {interval}s", "signal": "no task signal", "age": None}
             return {"verdict": "alive", "signal": "no task signal",
                     "age": None}
         return {"verdict": state, "signal": "nofiles", "age": None}
@@ -841,6 +850,13 @@ def summarize_liveness(act):
     # silent (or any other file-observed running label): proc-gated wording.
     if proc_ok is False:
         return {"verdict": "unknown", "signal": "proc", "age": None}
+    res_delta = act.get("resource_delta")
+    if res_delta and res_delta.get("moving"):
+        cpu_n = res_delta.get("cpu_ticks", 0)
+        return {"verdict": f"alive, moving (cpu +{cpu_n})", "signal": "no task signal", "age": age}
+    elif res_delta:
+        interval = int(round(res_delta.get("interval_seconds", 1.0)))
+        return {"verdict": f"alive, no movement for {interval}s", "signal": "no task signal", "age": age}
     return {"verdict": "alive", "signal": "no task signal", "age": age}
 
 

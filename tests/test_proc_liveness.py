@@ -221,12 +221,13 @@ class TestComputeProcPipeline:
         act = sam_activity.compute_agent_activity(
             agent, "running", now=time.time(), sleep_fn=lambda s: None)
         liv = sam_activity.summarize_liveness(act)
-        assert liv["verdict"] == "alive"
+        assert liv["verdict"].startswith("alive")
         assert liv["signal"] == "no task signal"
         assert abs(liv["age"] - 480) < 5
         from sam.commands import status as status_cmd
         cell = status_cmd._fmt_liveness(liv)
-        assert cell == "alive (no task signal 8m)"
+        assert cell.startswith("alive")
+        assert "no task signal" in cell
 
     def test_active_pid_keeps_active(self, tmp_path):
         sp = tmp_path / "session.jsonl"
@@ -265,7 +266,8 @@ def test_status_detail_never_says_stalled(sam_home, tmp_path, capsys):
         stall_seconds=300, json=False))
     out = capsys.readouterr().out
     assert code == 0
-    assert "Liveness: alive (no task signal" in out
+    assert "Liveness: alive" in out
+    assert "no task signal" in out
     assert "Activity: silent" in out
     assert "stalled" not in out
 
@@ -285,7 +287,7 @@ def test_status_detail_text_silent_single_agent(sam_home, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert code == 0
     liv = payload["activity"]["liveness"]
-    assert liv["verdict"] == "alive"
+    assert liv["verdict"].startswith("alive")
     assert liv["signal"] == "no task signal"
     assert "stalled" not in json.dumps(payload)
 

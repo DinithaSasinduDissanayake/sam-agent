@@ -435,6 +435,10 @@ def _fmt_liveness(liv):
         if age is None:
             return "alive (no task signal)"
         return "alive (no task signal %s)" % _fmt_silence(age)
+    if verdict.startswith("alive"):
+        if age is None:
+            return "%s (%s)" % (verdict, signal)
+        return "%s (%s %s)" % (verdict, signal, _fmt_silence(age))
     if age is None:
         return "%s" % verdict
     return "%s %s (%s)" % (verdict, _fmt_age(age), signal)

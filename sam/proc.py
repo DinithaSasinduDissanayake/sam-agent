@@ -171,16 +171,78 @@ def read_proc_resource(pid):
     try:
         with open(f"/proc/{pid}/io", "r") as f:
             for line in f:
-                if line.startswith("read_bytes:"):
+                if line.startswith("rchar:"):
                     io_read = int(line.split()[1])
-                elif line.startswith("write_bytes:"):
+                elif line.startswith("wchar:"):
                     io_write = int(line.split()[1])
-                if io_read is not None and io_write is not None:
-                    break
+                elif io_read is None and line.startswith("read_bytes:"):
+                    io_read = int(line.split()[1])
+                elif io_write is None and line.startswith("write_bytes:"):
+                    io_write = int(line.split()[1])
     except (OSError, ValueError, IndexError):
         pass
     return {"state": state, "cpu_ticks": cpu_ticks,
             "io_read_bytes": io_read, "io_write_bytes": io_write}
+
+
+def read_group_resource(pgid):
+    """Enumerate /proc/*/stat for pgrp == pgid, sum utime+stime,
+    and sum rchar/wchar from /proc/<pid>/io.
+    """
+    if pgid is None:
+        return None
+    total_cpu = 0
+    total_rchar = 0
+    total_wchar = 0
+    found_any = False
+
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return None
+
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        pid_str = entry
+        stat_path = f"/proc/{pid_str}/stat"
+        try:
+            with open(stat_path, "r") as f:
+                data = f.read()
+            lp = data.rfind(")")
+            if lp == -1:
+                continue
+            fields = data[lp + 1:].strip().split()
+            # after comm: state(0), pgrp(1), session(2), ... utime(11), stime(12)
+            if len(fields) < 13:
+                continue
+            pgrp = int(fields[2])
+            if pgrp != pgid:
+                continue
+            found_any = True
+            total_cpu += int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            continue
+
+        io_path = f"/proc/{pid_str}/io"
+        try:
+            with open(io_path, "r") as f:
+                for line in f:
+                    if line.startswith("rchar:"):
+                        total_rchar += int(line.split()[1])
+                    elif line.startswith("wchar:"):
+                        total_wchar += int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            pass
+
+    if not found_any:
+        return None
+
+    return {
+        "cpu_ticks": total_cpu,
+        "io_read_bytes": total_rchar,
+        "io_write_bytes": total_wchar,
+    }
 
 
 def proc_liveness(pid, stored_start_time=None, stored_pgid=None):
@@ -223,8 +285,11 @@ def proc_liveness(pid, stored_start_time=None, stored_pgid=None):
     return out
 
 
-def resource_delta(pid, interval_seconds, sleep_fn=None):
+def resource_delta(pid, interval_seconds, sleep_fn=None, pgid=None):
     """Item-7 tier-2: two-sample CPU/IO delta over interval_seconds.
+
+    Probes the whole process group: enumerates /proc/*/stat for pgrp == pgid,
+    sums utime+stime and /proc/<pid>/io rchar/wchar. Falls back to single pid.
 
     Returns None when either /proc sample is unavailable, else
     {"interval_seconds", "cpu_ticks", "io_read_bytes", "io_write_bytes",
@@ -233,10 +298,15 @@ def resource_delta(pid, interval_seconds, sleep_fn=None):
     """
     if sleep_fn is None:
         sleep_fn = time.sleep
-    a = read_proc_resource(pid)
+    target_pgid = pgid or pgid_of(pid) or pid
+    a = read_group_resource(target_pgid)
+    if a is None:
+        a = read_proc_resource(pid)
     if interval_seconds and interval_seconds > 0:
         sleep_fn(interval_seconds)
-    b = read_proc_resource(pid)
+    b = read_group_resource(target_pgid)
+    if b is None:
+        b = read_proc_resource(pid)
     if a is None or b is None:
         return None
 
