@@ -813,7 +813,7 @@ def launches_path(sam_home=None):
     return (sam_home or sam_config.get_sam_home()) / LAUNCHES_FILE
 
 
-def record_launch(agent_id, run_id, kind, bypassed=False, fail_open=False, model=None, name=None, ts=None):
+def record_launch(agent_id, run_id, kind, bypassed=False, fail_open=False, model=None, name=None, ts=None, harness=None):
     """Record a launch event in append-only launches.jsonl."""
     ts = time.time() if ts is None else float(ts)
     entry = {
@@ -825,6 +825,7 @@ def record_launch(agent_id, run_id, kind, bypassed=False, fail_open=False, model
         "model": model,
         "bypassed": bool(bypassed),
         "fail_open": bool(fail_open),
+        "harness": harness,
     }
     path = launches_path()
     try:

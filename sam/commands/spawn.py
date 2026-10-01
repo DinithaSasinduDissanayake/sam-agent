@@ -22,6 +22,7 @@ if str(_SAM_PKG) not in sys.path:
     sys.path.insert(0, str(_SAM_PKG))
 
 from sam import config as sam_config
+from sam import harness as sam_harness
 from sam import locks as sam_locks
 from sam import proc as sam_proc
 from sam import registry as sam_registry
@@ -119,10 +120,9 @@ def run(args):
             return _emit_error(2, str(e), as_json)
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
-        if harness == "agy" and thinking:
-            return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
-        if effort and harness != "agy":
-            return _emit_error(2, "--effort requires --harness agy", as_json)
+        flag_error = sam_harness.validate_reasoning_flags(harness, thinking, effort)
+        if flag_error:
+            return _emit_error(2, flag_error, as_json)
         inputs = validate_spawn_inputs(args, config, harness)
         depth = check_depth(config)
 
@@ -249,22 +249,13 @@ def run(args):
             wrapper = sam_config.wrapper_path(harness=harness)
             if not wrapper.is_file():
                 return _emit_error(1, "wrapper not installed; run sam init first", as_json)
-            if wrapper.resolve().name not in ("pi-wrapper", "agy-wrapper"):
+            if wrapper.resolve().name not in set(sam_config.HARNESS_WRAPPERS.values()):
                 return _emit_error(1, "allowlist validation failed", as_json)
 
-            argv = [
-                str(wrapper),
-                "--agent-id", agent_id,
-                "--model", model,
-                "--session", paths["session_path"],
-                "--task", paths["task_path"],
-                "--result", paths["result_path"],
-            ]
-            if harness == "agy":
-                if effort:
-                    argv.extend(["--effort", effort])
-            elif thinking:
-                argv.extend(["--thinking", thinking])
+            argv = sam_harness.get_harness(harness).build_argv(
+                wrapper, agent_id, model, paths["session_path"],
+                paths["task_path"], paths["result_path"],
+                thinking=thinking, effort=effort, resume=False)
 
             env = build_child_env(agent_id, model, depth, harness=harness)
             proc = subprocess.Popen(
@@ -284,6 +275,7 @@ def run(args):
                 fail_open=spawn_fail_open,
                 model=model,
                 name=name,
+                harness=harness,
             )
 
             # Update registry to running

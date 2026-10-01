@@ -66,34 +66,20 @@ def build_child_env(agent_id, model, depth, harness=None):
 
 def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
                    result_path, cwd, env, harness="pi", thinking=None, effort=None):
-    """Launch pi-wrapper or agy-wrapper as a subprocess in a new session.
+    """Launch a harness wrapper as a subprocess in a new session.
 
     Returns subprocess.Popen object.
-    Validates wrapper basename against allowlist (pi-wrapper, agy-wrapper).
+    Validates the wrapper basename against sam.config.HARNESS_WRAPPERS and
+    builds argv with the harness's own build_argv (same flags as spawn).
     """
+    from sam import config as sam_config  # lazy: avoid import cycles
+    from sam import harness as sam_harness
     wrapper = Path(wrapper_path).resolve()
-    if wrapper.name not in ("pi-wrapper", "agy-wrapper"):
+    if wrapper.name not in set(sam_config.HARNESS_WRAPPERS.values()):
         raise ValueError(f"allowlist validation failed: {wrapper.name}")
-
-    argv = [
-        str(wrapper),
-        "--agent-id", agent_id,
-        "--model", model,
-        "--session", str(session_path),
-        "--task", str(task_path),
-        "--result", str(result_path),
-    ]
-    if harness == "agy":
-        if thinking:
-            raise ValueError("--thinking cannot be used with harness 'agy'; use --effort")
-        if effort:
-            argv.extend(["--effort", effort])
-    else:
-        if effort:
-            raise ValueError("--effort requires harness 'agy'")
-        if thinking:
-            argv.extend(["--thinking", thinking])
-
+    argv = sam_harness.get_harness(harness).build_argv(
+        wrapper, agent_id, model, session_path, task_path, result_path,
+        thinking=thinking, effort=effort)
     return subprocess.Popen(
         argv,
         cwd=cwd,

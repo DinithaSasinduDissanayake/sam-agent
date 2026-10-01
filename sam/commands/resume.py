@@ -60,10 +60,9 @@ def run(args):
                  or sam_config.resolve_model(None, harness, config))
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
-        if harness == "agy" and thinking:
-            return _emit(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
-        if effort and harness != "agy":
-            return _emit(2, "--effort requires --harness agy", as_json)
+        flag_error = sam_harness.validate_reasoning_flags(harness, thinking, effort)
+        if flag_error:
+            return _emit(2, flag_error, as_json)
 
         infra_retry = bool(getattr(args, "_infra_retry", False))
         override_reason = (getattr(args, "override_reason", None) or "").strip() or None
@@ -87,6 +86,9 @@ def run(args):
         session_path = agent.get("session_path")
         if harness == "pi" and (not session_path or not os.path.isfile(session_path)):
             return _emit(1, f"session file not found: {session_path}", as_json)
+        oc_error = _opencode_resume_error(harness, session_path, infra_retry)
+        if oc_error:
+            return _emit(1, oc_error, as_json)
 
         gate_res = sam_proc.launch_gate(
             name=agent_name,
@@ -142,6 +144,16 @@ def run(args):
                         if not infra_retry:
                             return _emit(1, "no valid conversation_id pointer; use spawn not resume", as_json)
                         resume_flag = False
+                    if harness == "opencode":
+                        oc_error = _opencode_resume_error(harness, session_path, infra_retry)
+                        if oc_error:
+                            return _emit(1, oc_error, as_json)
+                        # Plain resume continues. An infra retry continues the
+                        # recorded session when possible (agy parity), else it
+                        # starts a fresh session on the same task.
+                        resume_flag = (not infra_retry) or (
+                            sam_harness.OPENCODE_RESUME_SUPPORTED
+                            and bool(sam_harness.read_conversation_id(session_path)))
                     h = sam_harness.get_harness(harness)
                     wrapper = sam_config.wrapper_path(harness=harness)
                     if not wrapper.is_file():
@@ -196,7 +208,7 @@ def run(args):
                     # Reasoning overrides apply to the continued run. Resume
                     # never changes harness, so only the active harness's
                     # setting is stored and the other's is cleared.
-                    if harness == "agy":
+                    if harness in ("agy", "opencode"):
                         agent["effort"] = effort
                         agent["thinking"] = None
                     else:
@@ -218,8 +230,8 @@ def run(args):
             agent["session_path"],
             str(sam_task_path),
             agent["result_path"],
-            thinking=thinking if harness != "agy" else None,
-            effort=effort if harness == "agy" else None,
+            thinking=thinking if harness == "pi" else None,
+            effort=effort if harness != "pi" else None,
             resume=resume_flag,
         )
 
@@ -244,6 +256,7 @@ def run(args):
                 fail_open=gate_res.get("fail_open", False),
                 model=model,
                 name=agent_name,
+                harness=harness,
             )
         except Exception as e:
             with sam_locks.registry_lock(exclusive=True, timeout=10):
@@ -299,6 +312,22 @@ def run(args):
         return _emit(8, f"lock timeout: {e}", as_json)
     except Exception as e:
         return _emit(1, str(e), as_json)
+
+
+def _opencode_resume_error(harness, session_path, infra_retry):
+    """None when an opencode resume may proceed, else the error message.
+
+    Infra retries are always allowed: they continue the recorded session
+    when possible and otherwise start fresh on the same task.
+    """
+    if harness != "opencode" or infra_retry:
+        return None
+    if not sam_harness.OPENCODE_RESUME_SUPPORTED:
+        return ("resume is not supported for harness opencode (opencode cannot "
+                "continue a session headlessly); use sam spawn with a new task")
+    if not sam_harness.read_conversation_id(session_path):
+        return "no valid opencode session id pointer; use spawn not resume"
+    return None
 
 
 def _queued_retry(agent_id):

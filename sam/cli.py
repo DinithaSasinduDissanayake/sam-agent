@@ -39,10 +39,10 @@ def main():
     p_spawn.add_argument("--model", default=None, help="Model override")
     p_spawn.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
                          help="Thinking/reasoning level for model (off, minimal, low, medium, high, xhigh, max)")
-    p_spawn.add_argument("--harness", default=None, choices=["pi", "agy"],
+    p_spawn.add_argument("--harness", default=None, choices=["pi", "agy", "opencode"],
                          help="Harness wrapper to use (default $SAM_HARNESS, config defaults.harness, or pi)")
     p_spawn.add_argument("--effort", default=None,
-                         help="Effort level for agy harness (agy only; cannot combine --thinking with agy)")
+                         help="Effort level: agy (low|medium|high|max) or opencode (minimal|low|medium|high|max, passed as --variant); rejected for pi")
     p_spawn.add_argument("--cwd", default=None, help="Working directory")
     p_spawn.add_argument("--no-space", action="store_true",
                          help="Experiment-only: bypass the global ≥15s launch-spacing "
@@ -97,12 +97,12 @@ def main():
     p_restart = sub.add_parser("restart", parents=[base_parser], help="Restart a terminal agent")
     p_restart.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_restart.add_argument("--name", default=None, help="Agent name (alternative)")
-    p_restart.add_argument("--harness", default=None, choices=["pi", "agy"],
+    p_restart.add_argument("--harness", default=None, choices=["pi", "agy", "opencode"],
                            help="Harness wrapper to use (default stored harness, $SAM_HARNESS, config, or pi)")
     p_restart.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
                            help="Thinking/reasoning level override for model (pi only)")
     p_restart.add_argument("--effort", default=None,
-                           help="Effort level for agy harness (agy only)")
+                           help="Effort level for agy or opencode (opencode: minimal|low|medium|high|max)")
     p_restart.add_argument("--override-reason", default=None,
                            help="Override active 429 quota window with logged reason")
     p_restart.add_argument("--no-space", action="store_true",
@@ -127,10 +127,10 @@ def main():
     p_resume.add_argument("--model", default=None, help="Model override")
     p_resume.add_argument("--thinking", default=None, choices=["off", "minimal", "low", "medium", "high", "xhigh", "max"],
                          help="Thinking/reasoning level override for model")
-    p_resume.add_argument("--harness", default=None, choices=["pi", "agy"],
+    p_resume.add_argument("--harness", default=None, choices=["pi", "agy", "opencode"],
                           help="Harness wrapper to use (default stored harness, $SAM_HARNESS, config, or pi)")
     p_resume.add_argument("--effort", default=None,
-                          help="Effort level for agy harness (agy only)")
+                          help="Effort level for agy or opencode (opencode: minimal|low|medium|high|max)")
     p_resume.add_argument("--override-reason", default=None,
                           help="Override active 429 quota window with logged reason")
     p_resume.add_argument("--no-space", action="store_true",
