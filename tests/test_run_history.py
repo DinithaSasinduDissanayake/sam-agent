@@ -220,7 +220,7 @@ def test_agy_harness_wrapper_schema_parity(raw, expected):
 
 
 def test_tracked_wrappers_match_sources():
-    for name in ("pi", "agy"):
+    for name in ("pi", "agy", "opencode"):
         assert (ROOT / "bin" / f"{name}-wrapper").read_bytes() == (ROOT / "wrapper" / f"{name}_wrapper.py").read_bytes()
 
 
