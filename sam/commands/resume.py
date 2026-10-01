@@ -8,12 +8,11 @@ resume-vs-create based on session file existence.
 
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sam import config as sam_config
@@ -58,13 +57,6 @@ def run(args):
         if not task_path.is_file():
             return _emit(1, f"task file not found: {task_path}", as_json)
 
-        model = (getattr(args, "model", None)
-                 or agent.get("model")
-                 or os.environ.get("SAM_MODEL")
-                 or config.get("defaults", {}).get("model"))
-        if not model:
-            return _emit(1, "no model configured", as_json)
-
         # Harness: explicit flag → $SAM_HARNESS → stored entry → config → pi
         try:
             if getattr(args, "harness", None) or os.environ.get("SAM_HARNESS"):
@@ -73,6 +65,8 @@ def run(args):
                 harness = agent.get("harness") or sam_config.resolve_harness(None, config)
         except ValueError as e:
             return _emit(2, str(e), as_json)
+        model = (getattr(args, "model", None) or agent.get("model")
+                 or sam_config.resolve_model(None, harness, config))
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
         if harness == "agy" and thinking:
@@ -93,31 +87,58 @@ def run(args):
                     # Re-resolve state — must be terminal
                     resolved = sam_state.resolve_agent_state(
                         agent, agent.get("run_id", 1))
+                    # Infra-retry relaunches ride sam/retry.py's clock; plain
+                    # resume on a queued run must not race that clock.
+                    infra_retry = bool(getattr(args, "_infra_retry", False))
+                    if resolved == "awaiting_retry" and not infra_retry:
+                        item = _queued_retry(agent_id)
+                        fires = _fmt_fires(item)
+                        return _emit(5, f"already_queued{fires} "
+                                        f"(sam retry to fire now, or --cancel)",
+                                     as_json)
                     if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
                         return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
-                    # Check session file exists (pi requires the session.jsonl;
-                    # agy resumes from the conversation_id pointer, and a
-                    # missing pointer simply starts a fresh conversation).
+                    # Validate continuation before allocating a run or mutating state.
                     session_path = agent.get("session_path")
                     if harness == "pi" and (
-                            not session_path or not os.path.exists(session_path)):
+                            not session_path or not os.path.isfile(session_path)):
                         return _emit(1, f"session file not found: {session_path}", as_json)
+                    if harness != sam_harness.resolve_harness(agent):
+                        return _emit(1, "resume cannot change session harness", as_json)
+                    # argv resume flag: agy without a usable pointer may only
+                    # happen on an infra retry — fresh conversation, same
+                    # agent and task. Plain resume still requires the pointer.
+                    resume_flag = True
+                    if harness == "agy" and not sam_harness.read_conversation_id(session_path):
+                        if not infra_retry:
+                            return _emit(1, "no valid conversation_id pointer; use spawn not resume", as_json)
+                        resume_flag = False
+                    h = sam_harness.get_harness(harness)
+                    wrapper = sam_config.wrapper_path(harness=harness)
+                    if not wrapper.is_file():
+                        return _emit(1, "wrapper not installed; run sam init first", as_json)
 
-                    # Check restart budget
+                    # Check restart budget (infra retries are SAM-owned and
+                    # bypass the operator restart budget; still counted).
                     max_restarts = int(config.get("defaults", {}).get("max_restarts", 1))
                     rc = agent.get("restart_count", 0)
-                    if rc >= max_restarts:
+                    if rc >= max_restarts and not infra_retry:
                         return _emit(7, f"max restarts ({max_restarts}) reached", as_json)
 
                     # Allocate new run
                     run_count = agent.get("run_count", 1) + 1
                     new_run_dir = sam_config.agents_dir() / agent_id / f"run-{run_count:03d}"
+                    # Save tasks before the spawning transaction; legacy task_path
+                    # records remain readable and their original files stay intact.
+                    new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+                    sam_util.retain_previous_task(agent)
+                    sam_task_path = new_run_dir / "task.md"
+                    sam_util.snapshot_task_file(task_path, sam_task_path)
 
                     # Update registry: harness decides the session path.
                     # pi resume preserves the session file (history continues);
                     # agy resume preserves the conversation_id pointer.
-                    h = sam_harness.get_harness(harness)
                     prev_session = agent.get("session_path")
                     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     agent["state"] = "spawning"
@@ -127,6 +148,9 @@ def run(args):
                     agent["exit_code"] = None
                     agent["exit_signal"] = None
                     agent["killed_reason"] = None
+                    agent["duration_ms"] = None
+                    for key in ("ended_at", "started_at", "completed_at"):
+                        agent.pop(key, None)
                     agent["run_id"] = run_count
                     agent["run_count"] = run_count
                     agent["restart_count"] = rc + 1
@@ -135,10 +159,22 @@ def run(args):
                         prev_session, new_run_dir, for_resume=True)
                     agent["log_path"] = str(new_run_dir / "output.log")
                     agent["result_path"] = str(new_run_dir / "result.json")
-                    # task_path is writable but might be overwritten below
+                    agent["task_path"] = str(sam_task_path)
+                    agent["launch_deadline_at"] = (
+                        datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
                     # model can be updated
                     agent["model"] = model
                     agent["harness"] = harness
+                    # Reasoning overrides apply to the continued run. Resume
+                    # never changes harness, so only the active harness's
+                    # setting is stored and the other's is cleared.
+                    if harness == "agy":
+                        agent["effort"] = effort
+                        agent["thinking"] = None
+                    else:
+                        agent["thinking"] = thinking
+                        agent["effort"] = None
+                    agent["run_started_at"] = now_str
                     agent["updated_at"] = now_str
 
                     sam_registry.save_registry(reg)
@@ -146,22 +182,7 @@ def run(args):
         except sam_locks.LockTimeout:
             return _emit(8, f"could not acquire lock for '{agent_name}'", as_json)
 
-        # Copy task file to tasks dir
-        sam_task_path = sam_config.tasks_dir() / f"{agent_id}.md"
-        sam_util.copy_task_file(task_path, sam_task_path)
-        agent["task_path"] = str(sam_task_path)
-
-        # Create run directory
-        new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
         # Build argv and env (same as spawn)
-        try:
-            wrapper = sam_config.wrapper_path(harness=harness)
-        except ValueError as e:
-            return _emit(2, str(e), as_json)
-        if not wrapper.is_file():
-            return _emit(1, "wrapper not installed; run sam init first", as_json)
-
         argv = sam_harness.get_harness(harness).build_argv(
             wrapper,
             agent_id,
@@ -171,6 +192,7 @@ def run(args):
             agent["result_path"],
             thinking=thinking if harness != "agy" else None,
             effort=effort if harness == "agy" else None,
+            resume=resume_flag,
         )
 
         parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
@@ -209,6 +231,8 @@ def run(args):
                         a["pid"] = proc.pid
                         a["pgid"] = proc.pid
                         a["pid_start_time"] = sam_proc.read_pid_start_time(proc.pid)
+                        a["launch_deadline_at"] = None
+                        sam_util.wake_archived_agent(a)
                         a["updated_at"] = datetime.now(timezone.utc).strftime(
                             "%Y-%m-%dT%H:%M:%SZ")
                         sam_registry.save_registry(reg)
@@ -224,8 +248,10 @@ def run(args):
             "run_id": run_count,
             "pid": proc.pid,
             "session_path": agent.get("session_path"),
-            "session_continued": True,
+            "session_continuation_requested": resume_flag,
         }
+        if infra_retry:
+            result["infra_retry"] = True
         if as_json:
             print(json.dumps(result))
         else:
@@ -233,9 +259,27 @@ def run(args):
         return 0
 
     except sam_locks.LockTimeout as e:
-        return _emit(1, f"lock timeout: {e}", as_json)
+        return _emit(8, f"lock timeout: {e}", as_json)
     except Exception as e:
         return _emit(1, str(e), as_json)
+
+
+def _queued_retry(agent_id):
+    try:
+        from sam import retry as sam_retry
+        return sam_retry.find_for(agent_id)
+    except Exception:
+        return None
+
+
+def _fmt_fires(item):
+    if not item:
+        return ""
+    try:
+        ts = datetime.fromtimestamp(item["not_before"], timezone.utc)
+        return f" (fires ~{ts.strftime('%H:%M:%SZ')})"
+    except (KeyError, TypeError, ValueError, OSError):
+        return ""
 
 
 def _emit(code, message, as_json):

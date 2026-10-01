@@ -113,6 +113,36 @@ def copy_task_file(src, dst):
     os.chmod(str(dst), 0o600)
 
 
+def snapshot_task_file(src, dst):
+    """Save a run's task once. Never overwrite an existing historical file."""
+    data = Path(src).read_bytes()
+    dst = Path(dst)
+    dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def retain_previous_task(agent):
+    """Backfill a legacy run snapshot without changing its shared task file."""
+    task = agent.get("task_path")
+    result = agent.get("result_path")
+    if task and result and Path(task).is_file():
+        snapshot = Path(result).parent / "task.md"
+        if not snapshot.exists():
+            snapshot_task_file(task, snapshot)
+
+
+def wake_archived_agent(agent):
+    """Called only when the new worker's PID is successfully persisted."""
+    agent["archived"] = False
+    for key in ("archived_at", "archive_reason", "archived_reason", "prune_reason",
+                "pruned", "pruned_at"):
+        agent.pop(key, None)
+
+
 def emit_error(code, message, as_json):
     """Print error to stderr in JSON or text format. Returns the exit code."""
     if as_json:

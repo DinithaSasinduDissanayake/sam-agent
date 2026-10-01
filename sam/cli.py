@@ -44,6 +44,14 @@ def main():
     p_spawn.add_argument("--effort", default=None,
                          help="Effort level for agy harness (agy only; cannot combine --thinking with agy)")
     p_spawn.add_argument("--cwd", default=None, help="Working directory")
+    p_spawn.add_argument("--no-space", action="store_true",
+                         help="Experiment-only: bypass the global ≥15s launch-spacing "
+                              "guard (e.g. instrumented burst canaries). The launch is "
+                              "still timestamped. Never use for real work.")
+    p_spawn.add_argument("--override-reason", default=None,
+                         help="Force-launch during an active 429 quota window "
+                              "(reason is logged to the registry and shown by "
+                              "sam doctor). Reason required.")
 
     p_status = sub.add_parser("status", parents=[base_parser], help="Show agent state")
     p_status.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
@@ -60,7 +68,7 @@ def main():
                           metavar="SECONDS",
                           help="Two-sample byte deltas over SECONDS (1-30, default 5); implies --detail")
     p_status.add_argument("--stall-seconds", type=int, default=300,
-                          help="Seconds before a verified-live agent is possibly_stalled (default 300)")
+                          help="Seconds before a verified-live agent is silent (reported `alive (no task signal Xm)`, never bare stalled; default 300)")
 
     p_kill = sub.add_parser("kill", parents=[base_parser], help="Kill a running agent")
     p_kill.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
@@ -69,8 +77,15 @@ def main():
     p_wait = sub.add_parser("wait", parents=[base_parser], help="Wait for agent completion")
     p_wait.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_wait.add_argument("--name", default=None, help="Agent name (alternative)")
-    p_wait.add_argument("--timeout", type=int, default=300,
-                        help="Max wait time in seconds (default 300, 0 = wait forever)")
+    p_wait.add_argument("--timeout", type=int, default=0,
+                        help="0 (default) = wait forever; nonzero = DEPRECATED "
+                             "detach (exit 0, agent untouched) — use --timeout 0 "
+                             "to block, sam status to peek, or --kill-after N "
+                             "to terminate on expiry")
+    p_wait.add_argument("--kill-after", type=int, default=None, metavar="N",
+                        help="Explicit kill opt-in: if still not terminal after "
+                             "N seconds, SIGTERM→SIGKILL, exit 4, state killed. "
+                             "0 = no bound")
 
     p_logs = sub.add_parser("logs", parents=[base_parser], help="Show agent logs")
     p_logs.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
@@ -117,6 +132,26 @@ def main():
     p_result.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")
     p_result.add_argument("--name", default=None, help="Agent name (alternative)")
 
+    # v0.2: retry — SAM-owned infra-retry queue (fire/cancel/list)
+    p_retry = sub.add_parser("retry", parents=[base_parser],
+                             help="Fire/cancel/list SAM-owned infra-retries")
+    p_retry.add_argument("id_or_name", nargs="?", default=None,
+                         help="Agent ID or name (omit to list the queue)")
+    p_retry.add_argument("--name", default=None, help="Agent name (alternative)")
+    p_retry.add_argument("--cancel", action="store_true",
+                         help="Dequeue; agent -> killed (retry_cancelled)")
+    p_retry.add_argument("--due", action="store_true",
+                         help="Fire every due queued retry")
+    p_retry.add_argument("--override-reason", default=None,
+                         help="Fire before not_before (reason is logged)")
+
+    # v0.2: doctor — offline spacing/concurrency/override audit
+    p_doctor = sub.add_parser("doctor", parents=[base_parser],
+                              help="Audit spawn spacing, concurrency, overrides, queue")
+    p_doctor.add_argument("--window", nargs="?", const=24.0, type=float,
+                          default=24.0, metavar="HOURS",
+                          help="Look-back window in hours (default 24)")
+
     # Parse everything at once — argparse handles help natively
     args = parser.parse_args()
 
@@ -160,6 +195,10 @@ def main():
             from sam.commands.resume import run as cmd_run
         elif cmd == "result":
             from sam.commands.result import run as cmd_run
+        elif cmd == "retry":
+            from sam.commands.retry import run as cmd_run
+        elif cmd == "doctor":
+            from sam.commands.doctor import run as cmd_run
         else:
             print(f"sam: unknown command: {cmd}", file=sys.stderr)
             sys.exit(2)

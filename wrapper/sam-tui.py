@@ -36,13 +36,18 @@ REFRESH_SEC = 2
 RECENT_DAYS = 7
 RECENT_LIMIT = 20
 
-LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
-          "no result.json (check logs/result). AGE = since current-run start; "
-          "DONE = since done (result ended_at) else -; ACT = motion "
-          "(▲active ▬idle !stalled …starting, from file-write age); "
-          "Model shows [thinking] (pi) or [effort:X] (agy, when overridden).")
+LEGEND = ("Hints: failed! needs attention; partial* = failed run with captured "
+          "deliverable text (see PARTIAL.md); retry* = awaiting infra-retry "
+          "(sam retry NAME to fire, --cancel to drop); unknown?stale = PID "
+          "dead/recycled, no result.json (check logs/result). AGE = since "
+          "current-run start; DONE = since done (result ended_at) else -; "
+          "ACT = motion (▲active ▬idle ~alive-no-task-signal …starting, "
+          "from file-write age + proc liveness); Model shows [thinking] "
+          "(pi) or [effort:X] (agy, when "
+          "overridden).")
 
-TERMINAL_STATES = frozenset({"completed", "failed", "killed"})
+TERMINAL_STATES = frozenset({
+    "completed", "failed", "killed", "partial", "awaiting_retry"})
 
 
 def _resolve(agent):
@@ -146,29 +151,33 @@ def _fmt_model(entry):
 def _fmt_state(state):
     if state == "failed":
         return "failed!"
+    if state == "partial":
+        return "partial*"
+    if state == "awaiting_retry":
+        return "retry*"
     if state == "unknown":
         return "unknown?stale"
     return state or "?"
 
 
 def _fmt_act(entry, state):
-    """Compact motion cell from stat-only liveness (no tail reads)."""
+    """Compact motion cell from proc+stat liveness (no tail reads)."""
     try:
         from sam.activity import quick_liveness
         liv = quick_liveness(entry, state)
     except Exception:
         return "-"
     verdict = liv.get("verdict", "?")
-    if verdict in ("completed", "failed", "killed", "spawning",
-                   "unknown"):
+    if verdict in ("completed", "failed", "killed", "partial", "spawning",
+                   "unknown", "awaiting_retry"):
         return "-"
     age = liv.get("age")
     if verdict == "active":
         return "▲%s" % _fmt_dur(age) if age is not None else "▲"
     if verdict == "idle":
         return "▬%s" % _fmt_dur(age) if age is not None else "▬"
-    if verdict == "stalled?":
-        return "!%s" % _fmt_dur(age) if age is not None else "!"
+    if verdict == "alive":
+        return "~%s" % _fmt_dur(age) if age is not None else "~"
     if verdict == "quiet-start":
         return "…"
     return verdict
@@ -239,6 +248,8 @@ def build_dashboard(show_archived=False):
     running = [a for a in agents if a["resolved_state"] == "running"]
     completed = [a for a in agents if a["resolved_state"] == "completed"]
     failed = [a for a in agents if a["resolved_state"] == "failed"]
+    partial = [a for a in agents if a["resolved_state"] == "partial"]
+    queued = [a for a in agents if a["resolved_state"] == "awaiting_retry"]
     unknown = [a for a in agents if a["resolved_state"] == "unknown"]
 
     # ── Summary bar (resolved counts) ──
@@ -249,6 +260,10 @@ def build_dashboard(show_archived=False):
         parts.append(f"  ✓ Completed: [green]{len(completed)}[/]")
     if failed:
         parts.append(f"  ✗ Failed: [red]{len(failed)}[/]")
+    if partial:
+        parts.append(f"  ◐ Partial: [magenta]{len(partial)}[/]")
+    if queued:
+        parts.append(f"  ↻ Retry queued: [yellow]{len(queued)}[/]")
     if unknown:
         parts.append(f"  ? Unknown: [yellow]{len(unknown)}[/]")
     parts.append(f"  ━ Total: {len(agents)}")
@@ -274,6 +289,10 @@ def build_dashboard(show_archived=False):
             icon, style = "▶", "yellow"
         elif state == "completed":
             icon, style = "✓", "green"
+        elif state == "partial":
+            icon, style = "◐", "magenta"
+        elif state == "awaiting_retry":
+            icon, style = "↻", "yellow"
         elif state == "unknown":
             icon, style = "?", "yellow"
         else:

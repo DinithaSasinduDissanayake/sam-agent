@@ -27,17 +27,24 @@ Terminology (deliberate and conservative):
 
 Activity states (conservative):
 
-  lifecycle passthrough: completed / failed / killed / spawning / unknown
+  lifecycle passthrough: completed / failed / killed / partial /
+                          awaiting_retry / spawning / unknown
   verified-live-PID only: tool_pending, active_recent_event,
-                          waiting_or_idle, possibly_stalled
+                          waiting_or_idle, silent
+
+"silent" = file signals beyond the stall threshold. It is never reported
+as bare "stalled": compute_agent_activity applies the item-7 proc-tier
+liveness pipeline (tier 1 pgid+start-time check → tier 2 resource-delta
+probe → tier 3 session-mtime heartbeat bonus), and the compact verdict
+for silent-but-alive workers is `alive (no task signal Xm)`.
 
 No live "thinking" / "producing_output" claim is made: the current wrapper
-runs `pi --print` (text mode), which buffers all output until the end of the
-run, so those phases are not observable from files.
+runs `pi --print` (text mode), which buffers all output until the end of
+the run, so those phases are not observable from files.
 
 Only a verified-live lifecycle state ("running", i.e. PID alive with
 matching start time) may be classified as tool_pending /
-active_recent_event / waiting_or_idle / possibly_stalled. A dead PID with no
+active_recent_event / waiting_or_idle / silent. A dead PID with no
 result.json remains lifecycle "unknown" and is never relabeled.
 """
 
@@ -47,6 +54,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+from sam import proc as sam_proc
 from sam import state as sam_state
 
 
@@ -63,6 +71,11 @@ WINDOW_30S = 30
 # Classification thresholds (seconds).
 DEFAULT_ACTIVE_WINDOW = 30
 DEFAULT_STALL_SECONDS = 300
+
+# Item 7: two-sample resource-delta probe interval for silent workers
+# (only runs for the silent branch of `status --detail`, never in the
+# stat-only dashboard path).
+RESOURCE_PROBE_S = 1.0
 
 # Watch (two-sample delta) interval bounds.
 WATCH_MIN = 1
@@ -600,9 +613,14 @@ def classify(agent, lifecycle_state, session, log, now=None,
     lifecycle_state is the existing resolve_agent_state() result. Only a
     verified-live lifecycle ("running" — PID alive with matching start
     time) may be classified as tool_pending / active_recent_event /
-    waiting_or_idle / possibly_stalled. Every other lifecycle state is
-    passed through unchanged, so a dead PID with no result.json stays
-    "unknown" and is never relabeled as stalled.
+    waiting_or_idle / silent. Every other lifecycle state is passed
+    through unchanged, so a dead PID with no result.json stays
+    "unknown" and is never relabeled.
+
+    "silent" = file signals beyond the stall threshold. It is a neutral
+    file-observation label, not a stuck claim; the proc/resource tiers
+    and the `alive (no task signal Xm)` verdict live in
+    compute_agent_activity() / summarize_liveness().
 
     session/log are the dicts returned by session_stats() / log_stats().
     """
@@ -638,7 +656,7 @@ def classify(agent, lifecycle_state, session, log, now=None,
         if age <= stall_seconds:
             return {"activity_state": "waiting_or_idle",
                     "evidence": evidence}
-        return {"activity_state": "possibly_stalled", "evidence": evidence}
+        return {"activity_state": "silent", "evidence": evidence}
 
     # No session and no log at all.
     started_age = _started_age(agent, now)
@@ -647,7 +665,64 @@ def classify(agent, lifecycle_state, session, log, now=None,
                         % started_age)
         return {"activity_state": "waiting_or_idle", "evidence": evidence}
     evidence.append("no session/log files despite start")
-    return {"activity_state": "possibly_stalled", "evidence": evidence}
+    return {"activity_state": "silent", "evidence": evidence}
+
+
+def _apply_proc_liveness(out, agent, stall_seconds=DEFAULT_STALL_SECONDS,
+                         sleep_fn=None):
+    """Item-7 proc-tier liveness pipeline for a computed activity block.
+
+    Tier 1: pgid+start-time identity check — failure downgrades the
+    activity state to "unknown" (the pid died or was recycled under us).
+    Tier 2 (silent branch only): two-sample CPU/IO resource-delta probe.
+    Tier 3 (silent branch only): session-mtime heartbeat bonus, which
+    upgrades silent to waiting_or_idle.
+
+    Returns the same dict (mutated). Never raises.
+    """
+    try:
+        if out.get("lifecycle_state") != "running":
+            return out
+        evidence = out.setdefault("evidence", [])
+        pid = agent.get("pid")
+        if pid is None:
+            evidence[:] = [e for e in evidence
+                           if "pid alive with start-time match" not in e]
+            evidence.append("proc tier: skipped (no pid recorded)")
+            out["proc"] = {"ok": None, "reason": "no pid recorded"}
+            return out
+        liv = sam_proc.proc_liveness(pid, agent.get("pid_start_time"),
+                                     agent.get("pgid"))
+        out["proc"] = liv
+        if not liv.get("ok"):
+            evidence[:] = [e for e in evidence
+                           if "pid alive with start-time match" not in e]
+            evidence.append("proc check failed: %s" % liv.get("reason"))
+            out["activity_state"] = "unknown"
+            return out
+        evidence.append("proc alive: pid + start-time match%s"
+                        % (" + pgid" if liv.get("pgid_match") else ""))
+        if out.get("activity_state") != "silent":
+            return out
+        delta = sam_proc.resource_delta(pid, RESOURCE_PROBE_S,
+                                        sleep_fn=sleep_fn)
+        if delta is None:
+            evidence.append("resource probe: unavailable (process gone?)")
+        else:
+            evidence.append(
+                "resource probe %.1fs: cpu %+d ticks, io %+d/%+d bytes%s"
+                % (delta["interval_seconds"], delta["cpu_ticks"],
+                   delta["io_read_bytes"], delta["io_write_bytes"],
+                   " (moving)" if delta["moving"] else " (no movement)"))
+        session = out.get("session") or {}
+        mtime_age = session.get("mtime_age")
+        if mtime_age is not None and mtime_age <= stall_seconds:
+            out["activity_state"] = "waiting_or_idle"
+            evidence.append("heartbeat bonus: session file touched %.0fs "
+                            "ago" % mtime_age)
+        return out
+    except Exception:
+        return out
 
 
 def compute_agent_activity(agent, lifecycle_state,
@@ -659,63 +734,74 @@ def compute_agent_activity(agent, lifecycle_state,
     Dispatches to the agent's harness (sam/harness.py): pi reuses the
     session_stats/log_stats/classify pipeline below (output identical to
     before the refactor); agy uses its conversation_id pointer model.
+    The item-7 proc-tier liveness pipeline (_apply_proc_liveness) runs on
+    top of either path.
 
     Returns:
-      lifecycle_state, activity_state, evidence,
+      lifecycle_state, activity_state, evidence, proc (tier-1 check),
       session (session_stats or agy pointer stats), log (log_stats),
       watch ({interval_seconds, session delta, log delta}) when requested.
     """
     from sam import harness as sam_harness  # lazy: harness delegates back here
+    now = time.time() if now is None else now
+    out = None
     try:
         h = sam_harness.get_harness(sam_harness.resolve_harness(agent))
-        return h.activity(agent, lifecycle_state,
-                          stall_seconds=stall_seconds, watch=watch,
-                          max_bytes=max_bytes, now=now, sleep_fn=sleep_fn)
+        out = h.activity(agent, lifecycle_state,
+                         stall_seconds=stall_seconds, watch=watch,
+                         max_bytes=max_bytes, now=now, sleep_fn=sleep_fn)
     except Exception:
-        pass
-    # Fallback: inline pi pipeline (identical shape) if harness lookup fails.
-    now = time.time() if now is None else now
-    session = session_stats(agent.get("session_path"), now=now,
-                            max_bytes=max_bytes)
-    log = log_stats(agent.get("log_path"), now=now, max_bytes=max_bytes)
-    cls = classify(agent, lifecycle_state, session, log, now=now,
-                   stall_seconds=stall_seconds)
-    out = {
-        "lifecycle_state": lifecycle_state,
-        "activity_state": cls["activity_state"],
-        "evidence": cls["evidence"],
-        "session": session,
-        "log": log,
-    }
-    if watch is not None:
-        interval = clamp_watch_seconds(watch)
-        deltas = watch_deltas(
-            {"session": agent.get("session_path"),
-             "log": agent.get("log_path")},
-            interval, sleep_fn=sleep_fn)
-        out["watch"] = {
-            "interval_seconds": interval,
-            "note": "two-sample byte delta; growth_bytes is None when "
-                    "not measurable (missing/replaced/shrunk/error)",
-            "session": deltas["session"],
-            "log": deltas["log"],
+        out = None
+    if out is None:
+        # Fallback: inline pi pipeline (identical shape) if harness lookup fails.
+        session = session_stats(agent.get("session_path"), now=now,
+                                max_bytes=max_bytes)
+        log = log_stats(agent.get("log_path"), now=now, max_bytes=max_bytes)
+        cls = classify(agent, lifecycle_state, session, log, now=now,
+                       stall_seconds=stall_seconds)
+        out = {
+            "lifecycle_state": lifecycle_state,
+            "activity_state": cls["activity_state"],
+            "evidence": cls["evidence"],
+            "session": session,
+            "log": log,
         }
-    return out
+        if watch is not None:
+            interval = clamp_watch_seconds(watch)
+            deltas = watch_deltas(
+                {"session": agent.get("session_path"),
+                 "log": agent.get("log_path")},
+                interval, sleep_fn=sleep_fn)
+            out["watch"] = {
+                "interval_seconds": interval,
+                "note": "two-sample byte delta; growth_bytes is None when "
+                        "not measurable (missing/replaced/shrunk/error)",
+                "session": deltas["session"],
+                "log": deltas["log"],
+            }
+    return _apply_proc_liveness(out, agent, stall_seconds=stall_seconds,
+                                sleep_fn=sleep_fn)
 
 
 def summarize_liveness(act):
     """Compact single-sample liveness verdict from a computed activity block.
 
     Answers "working or stuck?" without waiting and without spawning a
-    checker: verdict is one of active (signal within active window),
-    idle (signal within stall threshold), stalled (no signal beyond
-    threshold), working (unresolved tool calls outstanding), or the
-    lifecycle state itself for terminal/spawning/unknown/error rows.
-    Returns {"verdict", "signal", "age"}; age is seconds or None.
+    checker. Item-7 verdict vocabulary:
+      active   — signal within the active window
+      idle     — signal within the stall threshold (incl. heartbeat bonus)
+      working  — unresolved tool calls outstanding
+      alive    — proc tier ok but files silent: reported as
+                 `alive (no task signal Xm)` — never bare "stalled"
+      <state>  — lifecycle state itself for terminal/spawning/unknown/
+                 error rows (incl. partial / awaiting_retry)
+    Returns {"verdict", "signal", "age"}; age is seconds or None. For
+    verdict "alive", signal is "no task signal" and age is the time since
+    the most recent observable file signal (None when no files exist).
     """
     state = (act or {}).get("activity_state", "?")
-    if state in ("completed", "failed", "killed", "spawning",
-                 "unknown", "error"):
+    if state in sam_state.TERMINAL_STATES or \
+            state in ("spawning", "unknown", "error"):
         return {"verdict": state, "signal": "lifecycle", "age": None}
     if state == "tool_pending":
         pending = ((act.get("session") or {}).get("pending_tool_call_ids")
@@ -736,34 +822,51 @@ def summarize_liveness(act):
             signals.append(("log", float(lg["mtime_age"])))
         except (TypeError, ValueError):
             pass
+    proc_ok = (act.get("proc") or {}).get("ok")
     if not signals:
-        return {"verdict": "quiet-start" if state == "waiting_or_idle"
-                else state,
-                "signal": "nofiles", "age": None}
+        if state == "waiting_or_idle":
+            return {"verdict": "quiet-start", "signal": "nofiles",
+                    "age": None}
+        if state == "silent":
+            if proc_ok is False:
+                return {"verdict": "unknown", "signal": "proc", "age": None}
+            return {"verdict": "alive", "signal": "no task signal",
+                    "age": None}
+        return {"verdict": state, "signal": "nofiles", "age": None}
     kind, age = min(signals, key=lambda x: x[1])
     if state == "active_recent_event":
-        verdict = "active"
-    elif state == "waiting_or_idle":
-        verdict = "idle"
-    else:
-        verdict = "stalled?"
-    return {"verdict": verdict, "signal": kind, "age": age}
+        return {"verdict": "active", "signal": kind, "age": age}
+    if state == "waiting_or_idle":
+        return {"verdict": "idle", "signal": kind, "age": age}
+    # silent (or any other file-observed running label): proc-gated wording.
+    if proc_ok is False:
+        return {"verdict": "unknown", "signal": "proc", "age": None}
+    return {"verdict": "alive", "signal": "no task signal", "age": age}
 
 
 def quick_liveness(agent, lifecycle_state,
                    stall_seconds=DEFAULT_STALL_SECONDS,
                    active_window=DEFAULT_ACTIVE_WINDOW, now=None):
-    """Stat-only liveness for dashboards (no tail reads, no waiting).
+    """Proc+stat liveness for dashboards (no tail reads, no waiting).
 
-    Same verdict vocabulary as summarize_liveness() but derived from
-    file mtimes/sizes alone, so per-refresh cost is two stat() calls.
-    Terminal/spawning/unknown lifecycle states pass through unchanged.
+    Item-7 tier 1 runs first for lifecycle "running": a pgid+start-time
+    check that returns verdict "unknown" when the pid is dead, recycled,
+    or missing. File signals then map to active / idle / alive
+    (`alive (no task signal Xm)` — never bare "stalled"). Terminal,
+    spawning, and unknown lifecycle states (incl. partial and
+    awaiting_retry) pass through unchanged. Per-refresh cost is three
+    /proc reads plus two stat() calls.
     """
     now = time.time() if now is None else now
-    if lifecycle_state in ("completed", "failed", "killed",
-                           "spawning", "unknown"):
+    if lifecycle_state != "running":
         return {"verdict": lifecycle_state, "signal": "lifecycle",
                 "age": None}
+    liv = sam_proc.proc_liveness(agent.get("pid"),
+                                 agent.get("pid_start_time"),
+                                 agent.get("pgid"))
+    if not liv.get("ok"):
+        return {"verdict": "unknown", "signal": "proc", "age": None,
+                "reason": liv.get("reason")}
     signals = []
     size = None
     for key, kind in (("log_path", "log"), ("session_path", "session")):
@@ -786,6 +889,7 @@ def quick_liveness(agent, lifecycle_state,
     elif age <= stall_seconds:
         verdict = "idle"
     else:
-        verdict = "stalled?"
+        verdict = "alive"
+        kind = "no task signal"
     return {"verdict": verdict, "signal": kind, "age": age,
             "log_size": size}

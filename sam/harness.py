@@ -100,7 +100,7 @@ def read_conversation_id(session_path):
             return None
         with open(session_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read().strip()
-            return text.split()[0] if text else None
+            return text if re.fullmatch(r"[A-Za-z0-9_-]+", text) else None
     except OSError:
         return None
 
@@ -114,19 +114,19 @@ def extract_conversation_id(raw):
     """
     if not raw:
         return None
-    keys = ("conversation_id", "conversationId", "conversation",
-            "session_id", "sessionId", "id")
-
     def from_obj(obj):
         if isinstance(obj, dict):
-            for k in keys:
-                v = obj.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-                if isinstance(v, dict):
-                    nested = from_obj(v)
-                    if nested:
-                        return nested
+            # Only the documented terminal stream event may nest an envelope.
+            if obj.get("event") == "result":
+                obj = obj.get("result")
+            elif "event" in obj:
+                return None
+            if isinstance(obj, dict):
+                if "status" not in obj:
+                    return None
+                v = obj.get("conversation_id")
+                if isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]+", v):
+                    return v
         return None
 
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
@@ -141,11 +141,67 @@ def extract_conversation_id(raw):
         if not line.startswith("{"):
             continue
         try:
-            found = from_obj(json.loads(line))
+            obj = json.loads(line)
+            found = from_obj(obj)
         except (ValueError, TypeError):
             continue
         if found:
             return found
+        if isinstance(obj, dict) and ("status" in obj or obj.get("event") == "result"):
+            return None  # A malformed terminal envelope must not reuse an earlier ID.
+    return None
+
+
+def extract_pi_run_result(session_path, started_at, ended_at):
+    """Recover old active-branch final only within authoritative run timestamps."""
+    from sam.run_times import parse_timestamp
+    start, end = parse_timestamp(started_at), parse_timestamp(ended_at)
+    if start is None or end is None or end < start:
+        return None
+    try:
+        with open(session_path, encoding="utf-8") as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        if any(not isinstance(e, dict) for e in entries):
+            return None
+        entries = [e for e in entries if e.get("type") != "session"]
+        if not entries:
+            return None
+        leaf = entries[-1]
+        branch = []
+        if isinstance(leaf.get("id"), str) and "parentId" in leaf:
+            by_id = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
+            seen = set()
+            while leaf is not None:
+                if leaf.get("id") in seen:
+                    return None
+                seen.add(leaf.get("id"))
+                branch.append(leaf)
+                parent = leaf.get("parentId")
+                leaf = by_id.get(parent) if isinstance(parent, str) else None
+        else:
+            branch = reversed(entries)
+        for entry in branch:
+            msg = entry.get("message")
+            if not isinstance(msg, dict) or msg.get("role") not in ("assistant", "user", "toolResult"):
+                continue
+            stamp = msg.get("timestamp", entry.get("timestamp"))
+            # Pi message timestamps are epoch milliseconds; entries use ISO.
+            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+                stamp /= 1000
+            dt = parse_timestamp(stamp)
+            if dt is None or not start <= dt <= end:
+                return None
+            if msg.get("role") != "assistant" or msg.get("stopReason") != "stop":
+                return None
+            blocks = msg.get("content")
+            if not isinstance(blocks, list) or any(
+                    isinstance(b, dict) and b.get("type") == "toolCall" for b in blocks):
+                return None
+            text = "\n".join(b["text"] for b in blocks if isinstance(b, dict)
+                             and b.get("type") == "text" and isinstance(b.get("text"), str))
+            return text if text.strip() else None
+    except (OSError, ValueError, TypeError):
+        pass
     return None
 
 
@@ -157,7 +213,7 @@ class Harness:
     session_kind = "file"
 
     def build_argv(self, wrapper, agent_id, model, session_path,
-                   task_path, result_path, thinking=None, effort=None):
+                   task_path, result_path, thinking=None, effort=None, resume=False):
         raise NotImplementedError
 
     def spawn(self, wrapper, agent_id, model, session_path, task_path,
@@ -221,7 +277,7 @@ class PiHarness(Harness):
     session_kind = "jsonl"
 
     def build_argv(self, wrapper, agent_id, model, session_path,
-                   task_path, result_path, thinking=None, effort=None):
+                   task_path, result_path, thinking=None, effort=None, resume=False):
         if effort:
             raise ValueError("--effort requires harness 'agy'")
         argv = [str(wrapper), "--agent-id", agent_id, "--model", model,
@@ -278,7 +334,7 @@ class AgyHarness(Harness):
     session_kind = "pointer"
 
     def build_argv(self, wrapper, agent_id, model, session_path,
-                   task_path, result_path, thinking=None, effort=None):
+                   task_path, result_path, thinking=None, effort=None, resume=False):
         if thinking:
             raise ValueError(
                 "--thinking cannot be used with harness 'agy'; use --effort")
@@ -287,6 +343,8 @@ class AgyHarness(Harness):
                 "--result", str(result_path)]
         if effort:
             argv.extend(["--effort", effort])
+        if resume:
+            argv.append("--resume")
         return argv
 
     def resume_session(self, prev_session_path, new_run_dir, for_resume=False):

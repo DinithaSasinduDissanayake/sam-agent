@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -25,6 +25,7 @@ from sam import locks as sam_locks
 from sam import proc as sam_proc
 from sam import registry as sam_registry
 from sam import state as sam_state
+from sam import util as sam_util
 
 
 def _emit_error(code, message, as_json):
@@ -101,8 +102,28 @@ def run(args):
                 if rc >= max_restarts:
                     return _emit_error(7, f"max restarts ({max_restarts}) reached", as_json)
 
+                # Agy restart is documented as continuation, never a fresh fallback.
+                prev_session = agent.get("session_path")
+                if harness == "agy" and (
+                        sam_harness.resolve_harness(agent) != "agy" or
+                        not sam_harness.read_conversation_id(prev_session)):
+                    return _emit_error(1, "no valid conversation_id pointer; use spawn not restart", as_json)
+                h = sam_harness.get_harness(harness)
+                wrapper = sam_config.wrapper_path(harness=harness)
+                if not wrapper.is_file():
+                    return _emit_error(1, "wrapper not installed; run sam init first", as_json)
+                task_source = agent.get("task_path")
+                if not task_source or not Path(task_source).is_file():
+                    return _emit_error(1, f"task file not found: {task_source}", as_json)
+
                 # Line 9: Update counters
                 run_count = agent.get("run_count", 1) + 1
+                new_run_dir = sam_config.agents_dir() / agent_id / f"run-{run_count:03d}"
+                new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+                sam_util.retain_previous_task(agent)
+                task_snapshot = new_run_dir / "task.md"
+                sam_util.snapshot_task_file(task_source, task_snapshot)
+                agent["task_path"] = str(task_snapshot)
                 agent["run_id"] = run_count
                 agent["run_count"] = run_count
                 if resolved != "completed":
@@ -112,7 +133,7 @@ def run(args):
 
                 # Line 10-11: Reset state to spawning
                 now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                deadline = datetime.now(timezone.utc).isoformat() + "Z"
+                deadline = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
                 agent["state"] = "spawning"
                 agent["pid"] = None
                 agent["pgid"] = None
@@ -120,34 +141,33 @@ def run(args):
                 agent["exit_code"] = None
                 agent["exit_signal"] = None
                 agent["killed_reason"] = None
+                agent["duration_ms"] = None
+                for key in ("ended_at", "started_at", "completed_at"):
+                    agent.pop(key, None)
                 agent["launch_deadline_at"] = deadline
 
                 # Line 12: New run directory paths (harness decides session).
                 # pi: fresh run-NNN/session.jsonl; agy: preserve
                 # conversation_id pointer so the conversation continues.
-                new_run_dir = sam_config.agents_dir() / agent_id / f"run-{run_count:03d}"
-                prev_session = agent.get("session_path")
-                h = sam_harness.get_harness(harness)
                 agent["log_path"] = str(new_run_dir / "output.log")
                 agent["result_path"] = str(new_run_dir / "result.json")
                 agent["session_path"] = h.resume_session(
                     prev_session, new_run_dir, for_resume=False)
                 agent["harness"] = harness
+                # Reasoning overrides apply to the new run; a harness switch
+                # clears the other harness's stale setting.
+                if harness == "agy":
+                    agent["effort"] = effort
+                    agent["thinking"] = None
+                else:
+                    agent["thinking"] = thinking
+                    agent["effort"] = None
+                agent["run_started_at"] = now_str
 
                 # Line 13: Save registry
                 sam_registry.save_registry(registry)
 
-            # Line 15: Create run directory (outside lock)
-            new_run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-
             # Line 16: Build argv (same as spawn)
-            try:
-                wrapper = sam_config.wrapper_path(harness=harness)
-            except ValueError as e:
-                return _emit_error(2, str(e), as_json)
-            if not wrapper.is_file():
-                return _emit_error(1, "wrapper not installed; run sam init first", as_json)
-
             argv = sam_harness.get_harness(harness).build_argv(
                 wrapper,
                 agent_id,
@@ -157,6 +177,7 @@ def run(args):
                 agent["result_path"],
                 thinking=thinking if harness != "agy" else None,
                 effort=effort if harness == "agy" else None,
+                resume=harness == "agy",
             )
 
             # Build env (same as spawn)
@@ -206,6 +227,7 @@ def run(args):
                             a["pgid"] = proc.pid
                             a["pid_start_time"] = sam_proc.read_pid_start_time(proc.pid)
                             a["launch_deadline_at"] = None
+                            sam_util.wake_archived_agent(a)
                             a["updated_at"] = datetime.now(timezone.utc).strftime(
                                 "%Y-%m-%dT%H:%M:%SZ")
                             sam_registry.save_registry(registry)
@@ -225,6 +247,6 @@ def run(args):
         return 0
 
     except sam_locks.LockTimeout as e:
-        return _emit_error(1, f"lock timeout: {e}", as_json)
+        return _emit_error(8, f"lock timeout: {e}", as_json)
     except Exception as e:
         return _emit_error(1, str(e), as_json)

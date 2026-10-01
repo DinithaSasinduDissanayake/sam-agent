@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -37,6 +37,14 @@ def _emit_error(code, message, as_json):
     else:
         print(f"sam: {message}", file=sys.stderr)
     return code
+
+
+def _fmt_eta(ts):
+    try:
+        return datetime.fromtimestamp(float(ts), timezone.utc).strftime(
+            "%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        return "?"
 
 
 def generate_agent_id():
@@ -105,7 +113,7 @@ def allocate_paths(paths, agent_id, run_id):
         "log_path": str(run_dir / "output.log"),
         "result_path": str(run_dir / "result.json"),
         "session_path": str(agent_dir / "session.jsonl"),
-        "task_path": str(Path(paths["tasks"]) / f"{agent_id}.md"),
+        "task_path": str(run_dir / "task.md"),
     }
 
 
@@ -134,26 +142,109 @@ def run(args):
         parent_id = os.environ.get("SAM_AGENT_ID")
         root_id = os.environ.get("SAM_ROOT_ID")
 
-        # v0.1.1: concurrency warning — count true-running agents via resolve
+        # Global launch-spacing guard (IISA review item 1): steady-state
+        # headcount is fine, same-instant spawn bursts kill. Enforced in
+        # code because nested spawners ignore skill prose. Blocks up to
+        # ~45 s for a slot, then defers with re-run instructions.
+        def _count_live():
+            try:
+                reg = sam_registry.load_registry()
+                n = 0
+                for a in reg.get("agents", []):
+                    try:
+                        if sam_state.resolve_agent_state(
+                                a, a.get("run_id", 1)) == "running":
+                            n += 1
+                    except Exception:
+                        continue
+                return n
+            except Exception:
+                return 0
+
+        no_space = bool(getattr(args, "no_space", False))
+        override_reason = (getattr(args, "override_reason", None)
+                           or "").strip() or None
+
+        from sam import retry as sam_retry
+
+        # Same-name backstop: a queued infra-retry owns that name until it
+        # fires or is cancelled (the registry entry is terminal, so the
+        # active-name check below would not catch it).
+        pending = sam_retry.find_for_name(name)
+        if pending:
+            return _emit_error(
+                5,
+                f"already_queued: '{name}' has a pending infra-retry "
+                f"(fires ~{_fmt_eta(pending.get('not_before'))}). "
+                f"Wait for it, cancel with `sam retry {name} --cancel`, "
+                f"or force a different name.",
+                as_json)
+
+        # Quota breaker (IISA review item 4): fresh work of this model
+        # defers while a queued retry's advisory window is open. The
+        # queued retry itself never routes through this gate. "Resets in"
+        # is weather — overridable with a logged reason.
+        quota_window = None if override_reason else sam_retry.active_window(model)
+        if quota_window is not None:
+            retry_after = max(1, int(quota_window - time.time() + 0.5))
+            guidance = (
+                f"429 quota window active for model {model} "
+                f"(advisory until ~{_fmt_eta(quota_window)}). "
+                f"This is NOT an error — do not abort the task. "
+                f"Fresh spawns defer ~{retry_after}s "
+                f"(e.g. `sleep {retry_after}` then re-run this exact spawn "
+                f"unchanged), or pass --override-reason 'why now' to force "
+                f"(logged), or pick a different --model. Queued infra-retries "
+                f"for this model are unaffected."
+            )
+            if as_json:
+                print(json.dumps({
+                    "status": "deferred", "code": 6,
+                    "message": guidance,
+                    "retry_after_s": retry_after,
+                    "reason": "quota_window",
+                    "model": model,
+                    "window_until": quota_window,
+                }), file=sys.stderr)
+            else:
+                print(f"sam: {guidance}", file=sys.stderr)
+            return 6
+
+        # SAM_SLOT_WAIT_S is a test/ops escape hatch for the slot block
+        # (default 45 s); not a user-facing flag.
         try:
-            reg = sam_registry.load_registry()
-            same_model = 0
-            for a in reg.get("agents", []):
-                if a.get("model") != model:
-                    continue
-                try:
-                    if sam_state.resolve_agent_state(a, a.get("run_id", 1)) == "running":
-                        same_model += 1
-                except Exception:
-                    continue
-            if same_model >= 3:
-                print(
-                    f"Warning: {same_model} agents already running with model "
-                    f"{model}. Rate limits may occur.",
-                    file=sys.stderr,
-                )
-        except Exception:
-            pass  # Best-effort warning only
+            slot_wait_s = float(os.environ.get("SAM_SLOT_WAIT_S",
+                                                sam_proc.SLOT_WAIT_S))
+        except (TypeError, ValueError):
+            slot_wait_s = sam_proc.SLOT_WAIT_S
+        slot = sam_proc.acquire_spawn_slot(
+            name, str(task_path), model, no_space=no_space,
+            wait_s=slot_wait_s,
+            running=_count_live(), count_running=_count_live)
+        if not slot["granted"]:
+            retry_after = max(1, int(slot["retry_after_s"] + 0.5))
+            guidance = (
+                f"Launch slot unavailable ({slot['reason']}). "
+                f"This is NOT an error — do not abort the task. "
+                f"Wait ~{retry_after}s (e.g. `sleep {retry_after}`) and re-run "
+                f"this exact spawn command unchanged."
+            )
+            if slot.get("duplicate_suppressed"):
+                guidance += " (duplicate request suppressed; slot still held)"
+            if as_json:
+                print(json.dumps({
+                    "status": "deferred", "code": 6,
+                    "message": guidance,
+                    "retry_after_s": retry_after,
+                    "reason": slot["reason"],
+                    "duplicate_suppressed": slot.get(
+                        "duplicate_suppressed", False),
+                }), file=sys.stderr)
+            else:
+                print(f"sam: {guidance}", file=sys.stderr)
+            return 6
+        spawn_waited_s = round(slot.get("waited_s", 0.0), 1)
+        spacing_bypassed = bool(slot.get("bypassed", False))
 
         # 1-15: Lock sequence
         try:
@@ -178,7 +269,10 @@ def run(args):
                     agent_id = generate_agent_id()
                     run_id = 1
                     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    deadline = datetime.now(timezone.utc).isoformat() + "Z"
+                    # Spawning recovery window: now + 30s (a worker that has
+                    # not persisted its PID by the deadline resolves as
+                    # failed, not stuck-spawning forever).
+                    deadline = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                     s_paths = {
                         "agents": str(sam_config.agents_dir()),
@@ -200,11 +294,15 @@ def run(args):
                         "task_path": paths["task_path"],
                         "cwd": cwd,
                         "created_at": now_str, "updated_at": now_str,
+                        "run_started_at": now_str,
                         "exit_code": None, "exit_signal": None,
                         "duration_ms": None, "restart_count": 0,
                         "killed_reason": None,
                         "launch_deadline_at": deadline,
-                    }
+                    "spawn_waited_s": spawn_waited_s,
+                    "spacing_bypassed": spacing_bypassed,
+                    "quota_override_reason": override_reason,
+                }
                     registry["agents"].append(entry)
                     sam_registry.save_registry(registry)
 
@@ -214,13 +312,11 @@ def run(args):
         # 16-29: Post-lock operations
         try:
             run_dir = Path(paths["run_dir"])
-            run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
 
             # Copy task file
             dest_task = Path(paths["task_path"])
-            dest_task.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copy2(str(task_path), str(dest_task))
-            os.chmod(str(dest_task), 0o600)
+            sam_util.snapshot_task_file(task_path, dest_task)
 
             # Find and validate wrapper
             wrapper = sam_config.wrapper_path(harness=harness)

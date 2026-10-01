@@ -442,13 +442,13 @@ class TestClassify:
                                     _old_log(), now=NOW())
         assert cls["activity_state"] == "unknown"
 
-    def test_possibly_stalled_requires_verified_live(self):
-        """Only a verified-live lifecycle may be possibly_stalled."""
+    def test_silent_requires_verified_live(self):
+        """Only a verified-live lifecycle may be silent (never stalled)."""
         agent = make_agent()
         cls = sam_activity.classify(agent, "running", _old_session(),
                                     _old_log(), now=NOW(),
                                     stall_seconds=300)
-        assert cls["activity_state"] == "possibly_stalled"
+        assert cls["activity_state"] == "silent"
         assert any("pid alive" in e for e in cls["evidence"])
 
     def test_tool_pending_over_stall(self):
@@ -468,7 +468,7 @@ class TestClassify:
         session["pending_tool_call_ids"] = []
         cls = sam_activity.classify(agent, "running", session, _old_log(),
                                     now=NOW())
-        assert cls["activity_state"] == "possibly_stalled"
+        assert cls["activity_state"] == "silent"
 
     def test_active_recent_event(self):
         agent = make_agent()
@@ -490,7 +490,7 @@ class TestClassify:
                                     stall_seconds=300)
         assert cls["activity_state"] == "waiting_or_idle"
 
-    def test_possibly_stalled_beyond_threshold(self):
+    def test_silent_beyond_threshold(self):
         agent = make_agent()
         session = {"exists": True, "last_event_age": 400.0,
                    "tool_pending": False, "pending_tool_call_ids": []}
@@ -498,7 +498,7 @@ class TestClassify:
         cls = sam_activity.classify(agent, "running", session, log,
                                     now=NOW(), active_window=30,
                                     stall_seconds=300)
-        assert cls["activity_state"] == "possibly_stalled"
+        assert cls["activity_state"] == "silent"
 
     def test_recent_log_only_counts(self):
         agent = make_agent()
@@ -516,13 +516,13 @@ class TestClassify:
                                     now=NOW(), stall_seconds=300)
         assert cls["activity_state"] == "waiting_or_idle"
 
-    def test_no_files_old_start_possibly_stalled(self):
+    def test_no_files_old_start_silent(self):
         updated = iso(NOW() - 1000)
         agent = make_agent(updated_at=updated)
         cls = sam_activity.classify(agent, "running",
                                     {"exists": False}, {"exists": False},
                                     now=NOW(), stall_seconds=300)
-        assert cls["activity_state"] == "possibly_stalled"
+        assert cls["activity_state"] == "silent"
 
 
 # ── compute_agent_activity ───────────────────────────────────────────────────
@@ -583,6 +583,9 @@ class TestStatusCommand:
             pid_start_time=read_pid_start_time(os.getpid()),
             session_path=str(session_p) if session_p else None,
         )
+        # item-7 proc tier also verifies the recorded process group
+        from sam.proc import pgid_of
+        agent["pgid"] = pgid_of(os.getpid())
         write_registry(sam_home, [agent])
         return agent
 
@@ -697,7 +700,7 @@ class TestLivenessSummary:
         assert liv["verdict"] == "working"
         assert "call_1" in liv["signal"]
 
-    def test_active_idle_stalled_mapping(self):
+    def test_active_idle_alive_mapping(self):
         assert sam_activity.summarize_liveness({
             "activity_state": "active_recent_event",
             "session": {"exists": True, "last_event_age": 12},
@@ -709,11 +712,13 @@ class TestLivenessSummary:
             "log": {"exists": True, "mtime_age": 200},
         })["verdict"] == "idle"
         liv = sam_activity.summarize_liveness({
-            "activity_state": "possibly_stalled",
+            "activity_state": "silent",
             "session": {"exists": True, "last_event_age": 900},
             "log": {"exists": True, "mtime_age": 900},
         })
-        assert liv["verdict"] == "stalled?"
+        # item-7: silent-but-alive wording, never bare "stalled"
+        assert liv["verdict"] == "alive"
+        assert liv["signal"] == "no task signal"
         assert liv["age"] == 900
 
     def test_no_files_quiet_start(self):
@@ -727,24 +732,49 @@ class TestQuickLiveness:
     def test_terminal_passthrough(self):
         liv = sam_activity.quick_liveness({}, "completed")
         assert liv["verdict"] == "completed"
+        # item-7: partial / awaiting_retry pass through too (never file- judged)
+        for st in ("partial", "awaiting_retry"):
+            assert sam_activity.quick_liveness({}, st)["verdict"] == st
 
-    def test_active_idle_stalled_by_mtime(self, tmp_path):
+    @staticmethod
+    def _live_fields():
+        from sam.proc import pgid_of, read_pid_start_time
+        pid = os.getpid()
+        return {"pid": pid, "pid_start_time": read_pid_start_time(pid),
+                "pgid": pgid_of(pid)}
+
+    def test_active_idle_alive_by_mtime(self, tmp_path):
         log = tmp_path / "output.log"
         log.write_bytes(b"x" * 100)
-        agent = {"log_path": str(log), "session_path": None}
+        agent = {"log_path": str(log), "session_path": None,
+                 **self._live_fields()}
         now = time.time()
         assert sam_activity.quick_liveness(
             agent, "running", now=now)["verdict"] == "active"
         old = now - 400
         os.utime(str(log), (old, old))
-        assert sam_activity.quick_liveness(
-            agent, "running", now=now)["verdict"] == "stalled?"
+        liv = sam_activity.quick_liveness(agent, "running", now=now)
+        assert liv["verdict"] == "alive"       # never bare "stalled"
+        assert liv["signal"] == "no task signal"
+        assert liv["age"] == pytest.approx(400, abs=5)
         mid = now - 120
         os.utime(str(log), (mid, mid))
         assert sam_activity.quick_liveness(
             agent, "running", now=now)["verdict"] == "idle"
 
+    def test_dead_pid_is_unknown_not_stalled(self, tmp_path):
+        log = tmp_path / "output.log"
+        log.write_bytes(b"x" * 100)
+        old = time.time() - 400
+        os.utime(str(log), (old, old))
+        agent = {"log_path": str(log), "session_path": None,
+                 "pid": 2 ** 30, "pid_start_time": 1, "pgid": 2 ** 30}
+        liv = sam_activity.quick_liveness(agent, "running")
+        assert liv["verdict"] == "unknown"
+        assert liv["signal"] == "proc"
+
     def test_no_files(self):
         liv = sam_activity.quick_liveness(
-            {"log_path": None, "session_path": None}, "running")
+            {"log_path": None, "session_path": None, **self._live_fields()},
+            "running")
         assert liv["verdict"] == "quiet-start"

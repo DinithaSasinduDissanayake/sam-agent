@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from sam import proc as sam_proc
 
 
-TERMINAL_STATES = frozenset({"completed", "failed", "killed"})
+# awaiting_retry = terminal-for-now: run died of infra (429/startup-network),
+# SAM owns the relaunch clock (sam/retry.py). Idle until `sam retry` fires it;
+# `sam retry --cancel` / kill move it to killed.
+TERMINAL_STATES = frozenset({
+    "completed", "failed", "killed", "partial", "awaiting_retry"})
 
 
 def is_terminal(state):
@@ -76,10 +80,8 @@ def resolve_agent_state(
     result = _read_result(agent_entry, read_result_fn)
     if result is not None and isinstance(result, dict):
         hint = result.get("final_state_hint")
-        if hint == "completed":
-            return "completed"
-        if hint == "failed":
-            return "failed"
+        if hint in ("completed", "failed", "partial"):
+            return hint
 
     # Line 10-14: PID-based checks (only if result.json didn't give us the answer)
     if alive:
@@ -96,15 +98,10 @@ def resolve_agent_state(
     # Line 17: If result exists with valid final_state_hint
     if result is not None and isinstance(result, dict):
         hint = result.get("final_state_hint")
-        if hint in ("completed", "failed"):
+        if hint in ("completed", "failed", "partial"):
             return hint
         # Line 21: invalid hint → failed
-        # Line 19: if hint == "completed" → completed
-        if hint == "completed":
-            return "completed"
-        # Line 20: if hint == "failed" → failed
-        if hint == "failed":
-            return "failed"
+        return "failed"
         # Line 21: else → failed (invalid hint)
         return "failed"
 

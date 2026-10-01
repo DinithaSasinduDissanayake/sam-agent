@@ -115,6 +115,9 @@ def main():
                 pi_argv.extend(["--thinking", args.thinking])
             pi_argv.append(f"@{args.task}")
 
+            # Snapshot history immediately before execution, including IDs and
+            # message fingerprints so migration/rewrites cannot revive old text.
+            session_boundary = _session_boundary(args.session)
             try:
                 child = subprocess.Popen(
                     pi_argv,
@@ -186,7 +189,7 @@ def main():
         "wrapper_version": WRAPPER_VERSION,
         "conversation_id": None,
         "session_path": args.session,
-        "result": _extract_pi_result(args.session),
+        "result": _extract_pi_result(args.session, session_boundary) if returncode == 0 else None,
         "started_at": started_at,
         "ended_at": ended_at,
         "output_path": log_path,
@@ -202,46 +205,88 @@ def main():
     elif returncode == 0:
         sys.exit(0)
     else:
-        sys.exit(1)
+        sys.exit(exit_code)
 
 
-def _extract_pi_result(session_path):
-    """Best-effort: last assistant message with no toolCall -> text.
+def _read_session_entries(session_path):
+    """Read complete entries only; callers fail closed on filesystem errors."""
+    entries = []
+    with open(session_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.endswith("\n"):
+                raise ValueError("incomplete session entry")
+            entry = json.loads(line)
+            if not isinstance(entry, dict):
+                raise ValueError("invalid session entry")
+            entries.append(entry)
+    return entries
 
-    Reads session.jsonl line by line, keeps the last entry where
-    message.role == 'assistant' and no content block has type 'toolCall'.
-    Returns concatenated 'text' blocks, or None when absent/unparseable.
-    """
+
+def _message_key(entry):
+    return json.dumps(entry.get("message"), sort_keys=True, ensure_ascii=True)
+
+
+def _session_boundary(session_path):
+    """None means unreadable history: extraction must not guess a boundary."""
     try:
-        if not session_path or not os.path.isfile(session_path):
+        entries = _read_session_entries(session_path)
+    except FileNotFoundError:
+        entries = []
+    except (OSError, ValueError, TypeError):
+        return None
+    return ({e["id"] for e in entries if isinstance(e.get("id"), str)},
+            {_message_key(e) for e in entries if isinstance(e.get("message"), dict)})
+
+
+def _extract_pi_result(session_path, boundary=None):
+    """Current-run final on the active branch, not the last old non-tool text.
+
+    Pi v2/v3's last entry is the leaf; parentId links define its branch.
+    Only its latest conversational message can be final. Structured stopReason
+    must be 'stop'; toolUse, length, error and aborted are not final answers.
+    Legacy linear entries still require a current-run message fingerprint.
+    """
+    if boundary is None:
+        return None
+    try:
+        entries = [e for e in _read_session_entries(session_path)
+                   if e.get("type") != "session"]
+        if not entries:
             return None
-        last_text = None
-        with open(session_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line.startswith("{"):
-                    continue
-                try:
-                    entry = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                msg = entry.get("message")
-                if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                    continue
-                content = msg.get("content")
-                blocks = content if isinstance(content, list) else []
-                if any(isinstance(b, dict) and b.get("type") == "toolCall"
-                       for b in blocks):
-                    continue
-                texts = [b.get("text") for b in blocks
-                         if isinstance(b, dict) and b.get("type") == "text"
-                         and isinstance(b.get("text"), str)]
-                if texts:
-                    last_text = "\n".join(texts)
-        return last_text
-    except OSError:
+        leaf = entries[-1]
+        if isinstance(leaf.get("id"), str) and "parentId" in leaf:
+            by_id = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
+            branch = []
+            seen = set()
+            while leaf is not None:
+                eid = leaf.get("id")
+                if eid in seen:
+                    return None
+                seen.add(eid)
+                branch.append(leaf)
+                parent = leaf.get("parentId")
+                leaf = by_id.get(parent) if isinstance(parent, str) else None
+        else:
+            branch = reversed(entries)
+        for entry in branch:
+            msg = entry.get("message")
+            if not isinstance(msg, dict) or msg.get("role") not in ("assistant", "user", "toolResult"):
+                continue
+            old_ids, old_messages = boundary
+            if entry.get("id") in old_ids or _message_key(entry) in old_messages:
+                return None
+            if msg.get("role") != "assistant" or msg.get("stopReason") != "stop":
+                return None
+            blocks = msg.get("content")
+            if not isinstance(blocks, list) or any(
+                    isinstance(b, dict) and b.get("type") == "toolCall" for b in blocks):
+                return None
+            texts = [b["text"] for b in blocks if isinstance(b, dict)
+                     and b.get("type") == "text" and isinstance(b.get("text"), str)]
+            text = "\n".join(texts)
+            return text if text.strip() else None
+        return None
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -294,7 +339,7 @@ def _write_failed_result(result_path, agent_id, started_at, error_message,
         result = {
             "agent_id": agent_id,
             "harness": HARNESS,
-            "exit_code": -1,
+            "exit_code": 1,
             "exit_signal": None,
             "final_state_hint": "failed",
             "duration_ms": 0,

@@ -2,6 +2,12 @@
 """SAM wait — Block until agent reaches terminal state, persist it.
 
 Spec: reviews-phase-f-batch2.md — GLM-5.2 §5 + Grok-4.5 timing
+
+Item 5 (wait inversion, IISA review): `--timeout 0` (the default) pins
+wait-forever. Nonzero `--timeout N` is deprecated and DETACHES
+immediately (exit 0, agent left running, warning on stderr) — it never
+waits and never signals. `--kill-after N` is the explicit opt-in that
+keeps the old terminate-on-expiry semantics (exit 4, state killed).
 """
 
 import json
@@ -60,10 +66,21 @@ def run(args):
 
         agent_id = agent["id"]
         start_time = time.monotonic()
-        timeout = getattr(args, "timeout", 300)
-        # --timeout 0 means wait forever
-        if timeout == 0:
-            timeout = None
+        timeout = getattr(args, "timeout", None)
+        timeout = 0 if timeout is None else int(timeout)
+        kill_after = getattr(args, "kill_after", None)
+        try:
+            kill_after = int(kill_after) if kill_after is not None else None
+        except (TypeError, ValueError):
+            kill_after = None
+
+        def _warn_deprecated_timeout():
+            print("sam wait: deprecation: --timeout N no longer waits or "
+                  "terminates — it detaches immediately (exit 0, agent left "
+                  "running). Use --timeout 0 (default) to block until done, "
+                  "`sam status` for a non-blocking check, or --kill-after N "
+                  "to terminate on expiry. Nonzero --timeout will be "
+                  "rejected in a future release.", file=sys.stderr)
 
         # Line 3: Poll loop
         while True:
@@ -82,22 +99,67 @@ def run(args):
                 break
 
             elapsed = time.monotonic() - start_time
-            if timeout is not None and elapsed > timeout:
-                # Line 9: Timeout — kill the agent
+            if kill_after is not None and kill_after > 0 and elapsed > kill_after:
+                # Item 5: --kill-after N is the explicit kill opt-in.
+                # (A nonzero --timeout is ignored while kill-after is set.)
                 try:
                     pgid = agent.get("pgid") or agent.get("pid")
-                    if pgid:
+                    pid = agent.get("pid")
+                    def owned_group():
+                        return (pid is not None and pgid == pid
+                                and sam_proc.proc_start_time_match(
+                                    pid, agent.get("pid_start_time"))
+                                and sam_proc.pgid_of(pid) == pgid)
+                    if pgid and owned_group():
                         sam_proc.killpg(pgid, signal.SIGTERM)
                         for _ in range(25):
                             if not sam_proc.proc_alive(pgid):
                                 break
                             time.sleep(0.2)
-                        if sam_proc.proc_alive(pgid):
+                        if sam_proc.proc_alive(pgid) and owned_group():
                             sam_proc.killpg(pgid, signal.SIGKILL)
                             time.sleep(1.0)
                 except Exception:
                     pass
-                return _emit_error(4, "wait timeout exceeded", as_json)
+                # Spec: exit 4, state killed — persist it (the wrapper
+                # never gets to write a result after SIGKILL).
+                try:
+                    with sam_locks.registry_lock(exclusive=True, timeout=10):
+                        reg = sam_registry.load_registry()
+                        for a in reg.get("agents", []):
+                            if a.get("id") == agent_id:
+                                if a.get("state") not in sam_state.TERMINAL_STATES:
+                                    a["state"] = "killed"
+                                    a["killed_reason"] = "wait_kill_after"
+                                    a["updated_at"] = datetime.now(
+                                        timezone.utc).strftime(
+                                        "%Y-%m-%dT%H:%M:%SZ")
+                                break
+                        sam_registry.save_registry(reg)
+                except Exception:
+                    pass
+                if timeout > 0:
+                    _warn_deprecated_timeout()
+                return _emit_error(
+                    4, f"kill-after {kill_after}s exceeded; worker terminated",
+                    as_json)
+
+            if not (kill_after and kill_after > 0) and timeout > 0:
+                # Item 5 inversion: nonzero --timeout DETACHES. Never
+                # waits, never signals. --timeout 0 (default) waits forever.
+                _warn_deprecated_timeout()
+                out = {"status": current_state, "agent_id": agent_id,
+                       "detached": True, "timeout": timeout,
+                       "result": None,
+                       "elapsed_seconds": round(
+                           time.monotonic() - start_time, 2)}
+                if as_json:
+                    print(json.dumps(out))
+                else:
+                    print(f"Agent {agent_id} still {current_state} — detached "
+                          f"({out['elapsed_seconds']}s; deprecated --timeout "
+                          f"detach, agent left running)")
+                return 0
 
             time.sleep(0.5)
 
@@ -147,7 +209,8 @@ def run(args):
             return 0
 
         if current_state == "failed":
-            ec = agent.get("exit_code", -1)
+            ec = (result_dict.get("exit_code") if isinstance(result_dict, dict)
+                  else agent.get("exit_code", -1))
             out = {"status": "failed", "agent_id": agent_id,
                    "exit_code": ec, "result": result_dict,
                    "elapsed_seconds": elapsed}

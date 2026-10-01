@@ -75,6 +75,25 @@ def run(args):
             current_state = sam_state.resolve_agent_state(
                 agent, agent.get("run_id", 1))
 
+            # awaiting_retry = queued infra retry: kill cancels the queue item
+            # (operator contract: enqueue/cancel/prioritize only — no signals).
+            if current_state == "awaiting_retry":
+                from sam import retry as sam_retry
+                sam_retry.remove(agent_id)
+                agent["retry_not_before"] = None
+                agent["retry_kind"] = None
+                agent["state"] = "killed"
+                agent["killed_reason"] = "retry_cancelled"
+                agent["updated_at"] = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+                sam_registry.save_registry(registry)
+                if as_json:
+                    print(json.dumps({"status": "ok", "agent_id": agent_id,
+                          "outcome": "cancelled", "previous_state": "awaiting_retry"}))
+                else:
+                    print(f"Cancelled queued retry for {agent_id} (now killed)")
+                return 0
+
             if current_state in sam_state.TERMINAL_STATES:
                 # Already terminal — idempotent
                 if as_json:

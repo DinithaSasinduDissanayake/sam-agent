@@ -12,7 +12,7 @@ Opt-in enrichment (unchanged):
   --detail            adds the conservative activity layer (sam/activity.py)
   --watch [SECONDS]   adds two-sample byte deltas (implies --detail)
   --stall-seconds N   threshold before a verified-live agent is
-                      possibly_stalled
+                      reported silent (`alive (no task signal Xm)`)
 """
 
 import json
@@ -38,26 +38,102 @@ def _writeback_terminals(updates):
 
     updates: dict agent_id -> resolved terminal state. Best-effort;
     reloads under exclusive lock, sets state + updated_at, atomic save.
+    Infra deaths (429 quota / startup-network) are promoted to
+    awaiting_retry and enqueued instead of plain failed (item 4).
     """
     if not updates:
         return
     try:
+        from sam import retry as sam_retry
         with sam_locks.registry_lock(exclusive=True, timeout=10):
             registry = sam_registry.load_registry()
             dirty = False
+            promotions = []
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for a in registry.get("agents", []):
                 rid = updates.get(a.get("id"))
                 if rid is None:
                     continue
+                if rid == "failed" and a.get("state") != "failed":
+                    promoted, item = sam_retry.promote_if_infra(a)
+                    if promoted and item is not None:
+                        rid = "awaiting_retry"
+                        a["retry_not_before"] = item["not_before"]
+                        a["retry_kind"] = item.get("kind")
+                        promotions.append((a.get("name"), item.get("not_before")))
                 if rid in sam_state.TERMINAL_STATES and a.get("state") != rid:
                     a["state"] = rid
                     a["updated_at"] = now_str
                     dirty = True
             if dirty:
                 sam_registry.save_registry(registry)
+        for name, nb in promotions:
+            print(f"{name}: awaiting_retry (fires ~{_fmt_epoch(nb)}; "
+                  f"sam retry {name} to fire now)", file=sys.stderr)
     except Exception:
         pass
+
+
+def _fmt_epoch(ts):
+    try:
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        return "?"
+
+
+def _backfill_from_result(agent_ids):
+    """Item 6: read-through backfill — result.json → registry fields.
+
+    Registry `exit_code`/`duration_ms` were only written by the wait
+    persist path, so status-written terminal agents (and everything the
+    other session's audit tools read) stayed `exit_code: null`. For every
+    terminal agent whose registry `exit_code` is still None, copy the
+    authoritative values out of its result.json. Returns a dict
+    id -> patched fields (so callers can refresh their local copies).
+    """
+    if not agent_ids:
+        return {}
+    patched = {}
+    try:
+        with sam_locks.registry_lock(exclusive=True, timeout=10):
+            registry = sam_registry.load_registry()
+            dirty = False
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for a in registry.get("agents", []):
+                if a.get("id") not in agent_ids:
+                    continue
+                if a.get("exit_code") is not None:
+                    continue
+                if a.get("state") not in sam_state.TERMINAL_STATES:
+                    continue
+                rp = a.get("result_path")
+                if not rp or not os.path.exists(rp):
+                    continue
+                try:
+                    with open(rp, encoding="utf-8") as f:
+                        r = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                fields = {}
+                if r.get("exit_code") is not None:
+                    fields["exit_code"] = r["exit_code"]
+                if a.get("duration_ms") is None and r.get("duration_ms") is not None:
+                    fields["duration_ms"] = r["duration_ms"]
+                if a.get("exit_signal") is None and r.get("exit_signal") is not None:
+                    fields["exit_signal"] = r["exit_signal"]
+                if not fields:
+                    continue
+                a.update(fields)
+                a["updated_at"] = now_str
+                patched[a["id"]] = fields
+                dirty = True
+            if dirty:
+                sam_registry.save_registry(registry)
+    except Exception:
+        pass
+    return patched
 
 
 _DETAIL_HEADER = (
@@ -328,13 +404,28 @@ def _compute_activity(agent, resolved, stall_seconds, watch):
         }
 
 
+def _fmt_silence(age):
+    """Silence duration for the alive cell: `8m` / `480s` / `-`."""
+    if age is None:
+        return "-"
+    seconds = int(age)
+    if seconds >= 60:
+        return "%dm" % (seconds // 60)
+    return "%ds" % seconds
+
+
 def _fmt_liveness(liv):
-    """Compact `verdict age (signal)` cell, e.g. `active 12s (log)`."""
+    """Compact liveness cell: `active 12s (log)`; for the item-7 alive
+    verdict the exact spec wording `alive (no task signal 8m)`."""
     if not isinstance(liv, dict):
         return "?"
     verdict = liv.get("verdict", "?")
     age = liv.get("age")
     signal = liv.get("signal", "?")
+    if verdict == "alive":
+        if age is None:
+            return "alive (no task signal)"
+        return "alive (no task signal %s)" % _fmt_silence(age)
     if age is None:
         return "%s" % verdict
     return "%s %s (%s)" % (verdict, _fmt_age(age), signal)
@@ -409,10 +500,24 @@ def run(args):
             resolved = "unknown"
 
         _writeback_terminals({agent["id"]: resolved} if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state") else {})
+        # Item 6: read-through backfill so registry-only readers (audits,
+        # doctor, dashboards) see exit_code/duration_ms without opening
+        # result.json themselves.
+        if resolved in sam_state.TERMINAL_STATES and agent.get("exit_code") is None:
+            for _fid, _fields in _backfill_from_result({agent["id"]}).items():
+                agent.update(_fields)
 
         if detail:
             agent["activity"] = _compute_activity(
                 agent, agent["resolved_state"], stall_seconds, watch)
+
+        if agent.get("resolved_state") == "awaiting_retry":
+            try:
+                from sam import retry as _retry
+                _item = _retry.find_for(agent["id"])
+            except Exception:
+                _item = None
+            agent["retry"] = _item
 
         if as_json:
             out = _project_fields(agent, fields) if fields else agent
@@ -430,6 +535,11 @@ def run(args):
                       f"{_fmt_elapsed(agent):8s}")
                 if s in ("failed", "unknown"):
                     print(_HINT_LEGEND)
+            if s == "awaiting_retry":
+                item = agent.get("retry") or {}
+                print(f"  Retry: fires ~{_fmt_epoch(item.get('not_before'))} "
+                      f"(advisory) — sam retry {agent.get('name','?')} to fire, "
+                      f"--cancel to drop, --override-reason to force")
         return 0
 
     # List mode: resolve first, then filter default view on resolved state.
@@ -449,6 +559,20 @@ def run(args):
         resolved_list.append(entry)
 
     _writeback_terminals(updates)
+
+    # Item 6: backfill exit_code/duration_ms for terminal rows that still
+    # have registry exit_code None (status wrote the state but never the
+    # result fields; audits read the registry directly).
+    backfill_ids = {e.get("id") for e in resolved_list
+                    if e.get("resolved_state") in sam_state.TERMINAL_STATES
+                    and e.get("exit_code") is None
+                    and e.get("result_path")
+                    and os.path.exists(e.get("result_path"))}
+    if backfill_ids:
+        for _fid, _fields in _backfill_from_result(backfill_ids).items():
+            for e in resolved_list:
+                if e.get("id") == _fid:
+                    e.update(_fields)
 
     # Lean default: non-terminal + non-pruned + non-archived, newest-first,
     # last 10; --all keeps everything unfiltered but still attaches

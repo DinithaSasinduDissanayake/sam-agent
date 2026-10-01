@@ -91,8 +91,15 @@ sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>] [--thinkin
 | `--thinking` | No | Thinking/reasoning level, **pi only** (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); rejected with `agy` |
 | `--harness` | No | Harness wrapper (`pi`, `agy`; default: `pi` via $SAM_HARNESS or config defaults.harness) |
 | `--effort` | No | Effort level, **agy only** (`low`, `medium`, `high`, `max`); rejected without `agy` |
+| `--override-reason` | No | Force-launch during an open 429 quota window (reason logged; visible in `sam doctor`). Reason required |
 
 **Output:** Agent ID like `sam-20260716-103042-a1b2c3`.
+
+**Deferrals (not errors):** spawn may exit `6` `deferred` while the global
+≥15 s launch-spacing slot or a model's 429 quota window is open. The message
+says `NOT an error`: sleep `retry_after_s` and re-run the same spawn, or pass
+`--override-reason`. Exit `5` `already_queued` means that name already has a
+pending infra-retry (wait, `sam retry <name> --cancel`, or pick another name).
 
 **Agy example:**
 ```bash
@@ -115,8 +122,15 @@ sam status [<id-or-name>] [--json] [--all] [--limit N] [--detail] [--watch [SECO
 | `--detail` | Activity layer (tokens/progress or null with reason) |
 | `--watch [SECONDS]` | Two-sample byte deltas over SECONDS (1–30, default 5), then exits; implies `--detail`. Not a live view — for continuous monitoring use `sam-tui` |
 
-States: `spawning`, `running`, `completed`, `failed`, `killed`, `unknown`.
-Resolved dynamically; terminal states are written back to the registry.
+States: `spawning`, `running`, `completed`, `failed`, `killed`, `partial`,
+`awaiting_retry`, `unknown`.
+Resolved dynamically; terminal states are written back to the registry, and
+`exit_code`/`duration_ms` are backfilled from `result.json` (registry-only
+readers see the final exit code without opening the result file).
+`partial` = failed run with captured deliverable text (see `PARTIAL.md`);
+`awaiting_retry` = infra death (429 quota / startup-network) queued for
+SAM-owned relaunch — fire with `sam retry`, cancel with `sam retry --cancel`
+(or `sam kill`); `sam status <name>` prints the fires-at time.
 `AGE` = elapsed since the current run started (`run_started_at`, original
 `created_at` kept for history). Wrapper `started_at` takes precedence; missing
 start time for an older resumed run shows `-` rather than its original age.
@@ -155,17 +169,20 @@ distinct messages.
 Block until an agent reaches a terminal state.
 
 ```bash
-sam wait <id-or-name> [--timeout <seconds>] [--json]
+sam wait <id-or-name> [--timeout <seconds>] [--kill-after <seconds>] [--json]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--timeout <seconds>` | Max observation time (default: 300, 0 = wait forever). On expiry wait attempts to terminate the worker. Distinct from harness execution limits: agy is explicitly unlimited (`--print-timeout 0s`). |
+| `--timeout <seconds>` | **0 (default) = wait forever.** Nonzero is **deprecated and detaches**: returns immediately with exit 0, state unchanged, warning on stderr — it never waits and never signals. Migrate to `--timeout 0` (real wait) or `sam status` (peek). |
+| `--kill-after <seconds>` | Explicit kill opt-in (the old timed-wait semantics under a safe name): if still not terminal after N seconds, SIGTERM → SIGKILL, exit 4, state `killed`. `0` = no bound. Takes precedence over a nonzero `--timeout`. |
+
+Distinct from harness execution limits: agy is explicitly unlimited (`--print-timeout 0s`).
 
 **Exit codes:**
-- 0 = completed, killed, or unknown (read JSON `status` field to tell them apart)
+- 0 = completed, killed, unknown, partial, or awaiting_retry (read JSON `status` field to tell them apart); also a deprecated `--timeout N` detach (JSON `detached:true`, state `running`)
 - 1 = failed (read JSON `status`/`exit_code`) or lock/error
-- 4 = observation timeout — SIGTERM is attempted, then SIGKILL if still alive; inspect status to confirm termination
+- 4 = `--kill-after N` exceeded — termination attempted, state persisted as `killed`
 - 5 = not found
 
 **JSON output:**
@@ -181,7 +198,7 @@ Terminate a running agent.
 sam kill <id-or-name>
 ```
 
-Sends SIGTERM → waits 5s → sends SIGKILL if needed. `sam kill <unknown>` marks dead-PID unknown as `killed` (no signal if proc dead/recycled).
+Sends SIGTERM → waits 5s → sends SIGKILL if needed. `sam kill <unknown>` marks dead-PID unknown as `killed` (no signal if proc dead/recycled). On `awaiting_retry` it cancels the queued retry instead (no signal; state → `killed`, reason `retry_cancelled`).
 
 ### `sam logs`
 
@@ -212,7 +229,8 @@ per run; old runs untouched). Only works on terminal agents. Requires
 `--task`. Cannot change harness; agy requires a valid conversation pointer
 (use `spawn`, not `resume`, when it is missing). `--thinking`/`--effort`
 overrides are stored on the new run. Exit codes: 0 ok; 1 validation/launch
-error; 2 bad harness/flag mix; 3 not found; 5 missing id; 6 not terminal;
+error; 2 bad harness/flag mix; 3 not found; 5 missing id, or `already_queued`
+when the run awaits an infra-retry (wait or use `sam retry`); 6 not terminal;
 7 max restarts; 8 lock timeout.
 Resume model precedence: `--model` → stored model → `SAM_MODEL` →
     per-harness config/builtin. Reasoning flags apply to this run only; absent
@@ -234,6 +252,43 @@ harness clears the other harness's stale setting. Exit codes: 0 ok;
 1 validation/launch error; 2 bad harness/flag mix; 3 not found;
 6 not terminal; 7 max restarts; 8 lock timeout. Restart retains the stored model.
 
+### `sam retry`
+
+SAM-owned infra-retry queue: fire, cancel, or list queued relaunches.
+
+```bash
+sam retry                          # list queue (fires-at, due flag)
+sam retry <id-or-name>             # fire a DUE queued retry (relaunches same task)
+sam retry <id-or-name> --cancel    # dequeue; agent -> killed (retry_cancelled)
+sam retry --due                    # fire every due item
+sam retry <id-or-name> --override-reason <why>   # fire early (logged)
+```
+
+SAM auto-enqueues infra deaths only: 429 `RESOURCE_EXHAUSTED` (any length)
+and startup-network deaths (<2 min). `not_before` = parsed `Resets in`
+(advisory, capped 30 min) or default backoff + jitter — weather, not rails:
+`--override-reason` escapes it. Firing goes through the resume path (same
+agent, new run, operator restart budget bypassed; agy resumes the
+conversation when a pointer exists, else a fresh conversation on the same
+task). The spawn breaker never gates a queued retry; `sam kill` or
+`--cancel` drop it. Exit codes: 0 fired/listed; 1 not queued/launch error;
+3 not found; 5 not due (already_queued); 8 lock timeout.
+
+### `sam doctor`
+
+Offline audit of launch spacing, concurrency, overrides, and the retry
+queue (read-only; exits 0 unless the registry is unreadable).
+
+```bash
+sam doctor [--window [HOURS]] [--json]    # default window: 24 h
+```
+
+Per-spawn rows show `gap` since the previous spawn, concurrency at that
+instant, `bypassed` (`--no-space`), and `--override-reason` usage.
+`VERDICT: SPACING OK` = every gap ≥ 15 s (bypassed launches exempt) and
+concurrency at spawn ≤ 4; otherwise a `VIOLATIONS` count. JSON mode is
+scriptable. Use it to verify a burst window or review an override.
+
 ### `sam prune` / `sam unprune`
 
 Prune hides, never deletes. `sam prune` sets `archived=true` on terminal
@@ -252,7 +307,7 @@ sam unprune <id-or-name>
 
 When an invoker (any agent/human/CLI) spawns a child sub-agent:
 
-1. **Write a self-contained task file** — New workers receive this task plus native workspace/harness instructions, not the invoker's conversation. Resumed workers retain their own native history. Include goal, constraints, deliverables, and verification steps. For tasks longer than ~10 minutes, require incremental progress artifacts (e.g. append findings to `WORK_LOG.md` / `SUMMARY.md` as each unit completes, never only at the end) — silent-until-done workers are indistinguishable from stalled ones to both `status --detail` and the human dashboard.
+1. **Write a self-contained task file** — New workers receive this task plus native workspace/harness instructions, not the invoker's conversation. Resumed workers retain their own native history. Include goal, constraints, deliverables, and verification steps. For tasks longer than ~10 minutes, require incremental progress artifacts (e.g. append findings to `WORK_LOG.md` / `SUMMARY.md` as each unit completes, never only at the end) — a silent worker gets at most `alive (no task signal Xm)` from `status --detail` (proc-verified, never a stuck claim), so the artifacts are what distinguish real progress from a hang for humans and dashboards.
 
 2. **Spawn the sub-agent (forget by default — no auto-wait):**
    ```bash
@@ -264,13 +319,17 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
    ```bash
    sam wait research-auth-n1 --json
    ```
-   Explain that this blocks the turn. Use only when explicitly requested or
+   Explain that this blocks the turn until the agent is terminal (default
+   `--timeout 0` = wait forever). Use only when explicitly requested or
    required to consume output before returning. JSON contains `status` and
    nested `result` (possibly null); completed/failed include `exit_code`,
-   killed/unknown omit it. Inspect `status` even on exit 0.
-   NEVER use `sam wait --timeout N` as a liveness check: on expiry it
-   attempts to terminate the worker. Passive checks are `sam status`
-   (state) and `sam status <name> --detail` (working-vs-blocked verdict).
+   killed/unknown/partial/awaiting_retry omit it. Inspect `status` even on
+   exit 0.
+   NEVER pass a nonzero `--timeout`: it is deprecated and detaches
+   immediately (exit 0, warning) — useless as a wait and useless as a
+   liveness check. Passive checks are `sam status` (state) and
+   `sam status <name> --detail` (working-vs-blocked verdict).
+   Termination-on-expiry is explicit only: `--kill-after N`.
    NEVER spawn a progress-checker subagent to inspect another worker —
    one `--detail` call answers it without a new agent, task file, or run.
 
@@ -282,8 +341,7 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
    `status` → `result` → `logs -n 50`. `result` is final-only;
    `logs` (default 50 lines) is for the full stream.
 
-5. **Handle timeout:** Wait already attempts termination. Check compact status
-   before deciding whether a further kill or continuation is necessary.
+5. **Handle timeout:** `--kill-after N` attempts termination and persists `killed`; a plain wait (or a deprecated `--timeout N` detach) never signals. Check compact status before deciding whether a further kill or continuation is necessary.
 
 6. **Ignore sentinels:** Lines like `##PI_BEGIN_a1b2c3d4` and `##PI_END_a1b2c3d4` are SAM framing markers. They are stripped by default in `sam logs`. Use `--raw` to see them.
 
@@ -297,7 +355,7 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
 4. **Task files must be self-contained.** The sub-agent has no access to the parent/invoking process's conversation history. Include all necessary context.
 5. **Never edit `~/.sam/registry.json` directly.** Always use SAM commands.
 6. **Spawn-and-forget by default.** Never auto-wait, sleep, or poll after spawn. `wait` requires explicit synchronous intent as above.
-7. **Read tiers: `status` → `status --detail` → `result` → `logs -n 50`.** `status` gives state; `--detail` adds the `Liveness:` verdict (`active`/`idle`/`stalled?`/`working` with signal age — the working-vs-blocked answer, no checker agent needed); `result` is final-only; `logs` (default 50 lines) is the last resort for the full stream.
+7. **Read tiers: `status` → `status --detail` → `result` → `logs -n 50`.** `status` gives state; `--detail` adds the `Liveness:` verdict (`active`/`idle`/`working` with signal age, plus `alive (no task signal Xm)` for proc-verified but file-silent workers — tiered pgid+start-time check, resource probe, heartbeat bonus; never a bare "stalled") — the working-vs-blocked answer, no checker agent needed; `result` is final-only; `logs` (default 50 lines) is the last resort for the full stream.
 8. **Pass `--model` only when overriding the default.** Children inherit `SAM_MODEL` automatically. Any model the underlying `pi`/`agy` CLI accepts can be used — the config default is a default, not an allowlist.
 9. **Spawning recovery:** a worker that has not persisted its PID within 30s of launch resolves as `failed` (not stuck `spawning`); recover with `sam restart` or `sam kill`.
 
@@ -307,15 +365,15 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
 
 | Code | Meaning | Commands |
 |------|---------|----------|
-| 0 | OK, or wait rendezvous on completed/killed/unknown (read JSON `status`) | All |
-| 1 | General error; wait rendezvous on failed; lock timeout (wait/kill/logs); result unavailable | All |
+| 0 | OK, or wait rendezvous on any terminal state incl. partial/awaiting_retry (read JSON `status`) | All |
+| 1 | General error; wait rendezvous on failed; lock timeout (wait/kill/logs); result unavailable; retry not queued | All |
 | 2 | Name exists (non-terminal), bad harness/flag mix, ambiguous ref, missing result identifier; argparse misuse | spawn, resume, restart, result, logs, prune, unprune; parser |
-| 3 | Not found | kill, logs, restart, resume, result |
-| 4 | Observation timeout (termination attempted; inspect status) | wait |
-| 5 | Not found / identifier required | wait, resume |
-| 6 | Not terminal | restart, resume |
+| 3 | Not found | kill, logs, restart, resume, result, retry |
+| 4 | `--kill-after N` exceeded (terminated; state persisted `killed`). Deprecated nonzero `--timeout` instead detaches with exit 0 | wait |
+| 5 | Not found / identifier required; `already_queued` (resume on queued run; retry not due); spawn refused (name has queued retry) | wait, resume, retry, spawn |
+| 6 | Not terminal; `deferred` (spacing slot or 429 window open — not an error) | restart, resume, spawn |
 | 7 | Max restarts reached | restart, resume |
-| 8 | Lock timeout | spawn, resume, restart |
+| 8 | Lock timeout | spawn, resume, restart, retry |
 | 130 | KeyboardInterrupt (Ctrl+C) | All |
 
 ---

@@ -162,10 +162,11 @@ class TestGoldenPath:
             env=env)
         assert code == 0, f"status failed: {err}"
 
-        # Step 4: wait for completion
+        # Step 4: wait for completion (--timeout 0 = wait forever; item 5
+        # migrated this caller off the deprecated nonzero-timeout detach)
         code, out, err = run_sam_command(
             ["wait", {"json": True, "id_or_name": agent_id, "name": None,
-                       "timeout": 10}],
+                       "timeout": 0}],
             env=env)
         assert code == 0, f"wait failed: {err}"
         wait_data = json.loads(out)
@@ -200,7 +201,7 @@ class TestGoldenPath:
 
         code, out, err = run_sam_command(
             ["wait", {"json": True, "id_or_name": "fail-test", "name": None,
-                       "timeout": 10}],
+                       "timeout": 0}],
             env=env)
         assert code == 1, f"wait should return 1 for failure, got {code}"
         wait_data = json.loads(out)
