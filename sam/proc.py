@@ -139,6 +139,47 @@ def _pid_is_zombie(pid):
     parts = data[lp + 1:].strip().split()
     return bool(parts) and parts[0] == "Z"
 
+def group_alive(pgid):
+    """True while any NON-zombie process is in process group ``pgid``.
+
+    os.killpg(pgid, 0) succeeds while any member exists, including unreaped
+    zombies, so members are confirmed via /proc. Never raises.
+    """
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "r") as f:
+                data = f.read()
+        except OSError:
+            continue
+        lp = data.rfind(")")
+        if lp == -1:
+            continue
+        fields = data[lp + 1:].strip().split()
+        if len(fields) < 3:
+            continue
+        try:
+            if int(fields[2]) == pgid and fields[0] != "Z":
+                return True
+        except ValueError:
+            continue
+    return False
+
 
 def read_proc_resource(pid):
     """Single /proc sample: process state, CPU ticks, IO byte counters.

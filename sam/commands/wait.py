@@ -105,10 +105,12 @@ def run(args):
                     if pgid and owned_group():
                         sam_proc.killpg(pgid, signal.SIGTERM)
                         for _ in range(25):
-                            if not sam_proc.proc_alive(pgid):
+                            if not sam_proc.group_alive(pgid):
                                 break
                             time.sleep(0.2)
-                        if sam_proc.proc_alive(pgid) and owned_group():
+                        # A PGID cannot be reused while its group has members,
+                        # so a live group here is still ours.
+                        if sam_proc.group_alive(pgid):
                             sam_proc.killpg(pgid, signal.SIGKILL)
                             time.sleep(1.0)
                 except Exception:
@@ -133,6 +135,7 @@ def run(args):
                                     a["updated_at"] = datetime.now(
                                         timezone.utc).strftime(
                                         "%Y-%m-%dT%H:%M:%SZ")
+                                    a["ended_at"] = a["updated_at"]
                                 sam_registry.save_registry(reg)
                                 break
                 except Exception:

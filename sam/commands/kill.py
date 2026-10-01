@@ -21,6 +21,7 @@ from sam import config as sam_config
 from sam import locks as sam_locks
 from sam import proc as sam_proc
 from sam import registry as sam_registry
+from sam import run_times as sam_run_times
 from sam import state as sam_state
 
 
@@ -105,6 +106,10 @@ def run(args):
                     agent["killed_reason"] = "unknown_stale"
                     agent["updated_at"] = datetime.now(timezone.utc).strftime(
                         "%Y-%m-%dT%H:%M:%SZ")
+                    evidence = sam_run_times.run_end_evidence(agent)
+                    agent["ended_at"] = (
+                        evidence.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if evidence is not None else agent["updated_at"])
                     sam_registry.save_registry(registry)
                     if as_json:
                         print(json.dumps({"status": "ok", "agent_id": agent_id,
@@ -134,12 +139,12 @@ def run(args):
 
         # Line 12-14: Poll for death (5s max)
         for _ in range(25):  # 25 * 0.2 = 5s
-            if not sam_proc.proc_alive(target_pgid):
+            if not sam_proc.group_alive(target_pgid):
                 break
             time.sleep(0.2)
 
-        # Line 15: If still alive, send SIGKILL
-        if sam_proc.proc_alive(target_pgid):
+        # Line 15: If anything in the group survived, send SIGKILL
+        if sam_proc.group_alive(target_pgid):
             sam_proc.killpg(target_pgid, signal.SIGKILL)
             time.sleep(2.0)
 
@@ -169,6 +174,7 @@ def run(args):
                     agent["killed_reason"] = "user_kill"
                     agent["updated_at"] = datetime.now(timezone.utc).strftime(
                         "%Y-%m-%dT%H:%M:%SZ")
+                    agent["ended_at"] = agent["updated_at"]
                     sam_registry.save_registry(registry)
                 break
 
