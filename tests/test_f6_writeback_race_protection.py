@@ -172,3 +172,48 @@ def test_kill_does_not_clobber_concurrent_run(sam_env, monkeypatch):
     assert a["run_id"] == 2
     assert a["pid"] == 8888
     assert a["state"] == "running"
+
+
+def test_single_agent_status_writeback_race_protection(sam_env, monkeypatch):
+    agent = _seed_agent(sam_env, "agent-race-single", "race-single", run_id=1, pid=1234, state="running")
+
+    real_registry_lock = sam_locks.registry_lock
+    lock_count = 0
+
+    @contextlib.contextmanager
+    def race_lock(*args, **kwargs):
+        nonlocal lock_count
+        lock_count += 1
+        with real_registry_lock(*args, **kwargs):
+            if lock_count == 1:
+                # Concurrent resume bumped run_id and set running before writeback
+                reg = sam_registry.load_registry()
+                for a in reg["agents"]:
+                    if a["id"] == "agent-race-single":
+                        a["run_id"] = 2
+                        a["run_count"] = 2
+                        a["pid"] = 5678
+                        a["state"] = "running"
+                sam_registry.save_registry(reg)
+            yield
+
+    monkeypatch.setattr(sam_locks, "registry_lock", race_lock)
+
+    args = argparse.Namespace(
+        id_or_name="race-single",
+        name=None,
+        agent=None,
+        all=False,
+        follow=False,
+        json=True,
+        detail=False,
+        stall_seconds=300,
+        watch=None,
+    )
+    status_cmd.run(args)
+
+    final_reg = sam_registry.load_registry()
+    a = [x for x in final_reg["agents"] if x["id"] == "agent-race-single"][0]
+    assert a["run_id"] == 2
+    assert a["pid"] == 5678
+    assert a["state"] == "running"

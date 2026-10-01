@@ -54,15 +54,14 @@ def _writeback_terminals(updates):
                 val = updates.get(a.get("id"))
                 if val is None:
                     continue
-                if isinstance(val, tuple):
-                    rid, snap_run_id, snap_pid = val
-                    a_run = a.get("run_id") or a.get("run_count") or 1
-                    if snap_run_id is not None and a_run != snap_run_id:
-                        continue
-                    if snap_pid is not None and a.get("pid") != snap_pid:
-                        continue
-                else:
-                    rid = val
+                if not isinstance(val, tuple):
+                    continue
+                rid, snap_run_id, snap_pid = val
+                a_run = a.get("run_id") or a.get("run_count") or 1
+                if snap_run_id is not None and a_run != snap_run_id:
+                    continue
+                if snap_pid is not None and a.get("pid") != snap_pid:
+                    continue
                 if rid == "failed" and a.get("state") in ("running", "spawning", "unknown"):
                     promoted, item = sam_retry.promote_if_infra(a)
                     if promoted and item is not None:
@@ -495,7 +494,16 @@ def run(args):
             agent["resolved_state"] = "unknown"
             resolved = "unknown"
 
-        _writeback_terminals({agent["id"]: resolved} if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state") else {})
+        if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state"):
+            _writeback_terminals({
+                agent["id"]: (
+                    resolved,
+                    agent.get("run_id") or agent.get("run_count") or 1,
+                    agent.get("pid"),
+                )
+            })
+        else:
+            _writeback_terminals({})
         # Item 6: read-through backfill so registry-only readers (audits,
         # doctor, dashboards) see exit_code/duration_ms without opening
         # result.json themselves.
