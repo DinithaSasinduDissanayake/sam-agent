@@ -41,3 +41,15 @@ def test_logs_error_is_clean_when_log_path_is_directory(home, capsys):
     err = capsys.readouterr().err
     assert "sam_locks" not in err
     assert "Is a directory" in err
+
+
+def test_duplicate_guard_releases_after_advised_wait(home):
+    now = time.time()
+    state = {"last_spawn": now - 100, "recent": [{
+        "name": "dup", "task": "/t.md", "model": "m", "ts": now - 20,
+        "granted": False, "retry_after_s": 15, "reason": "spacing"}]}
+    (home / ".spawn_state.json").write_text(json.dumps(state))
+    res = sam_proc.acquire_spawn_slot("dup", "/t.md", "m", wait_s=0, running=0)
+    assert res["granted"] is True
+    assert res["duplicate_suppressed"] is False
+

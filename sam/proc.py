@@ -773,11 +773,17 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     # Inner result is always a (proceed, info) pair nested inside the
     # outer (save, result) protocol.
     def _check_duplicate(state):
-        for r in _prune_recent(state, time.time()):
+        now_ts = time.time()
+        for r in _prune_recent(state, now_ts):
             if (r.get("name") == name and r.get("task") == str(task)
                     and not r.get("granted", True)):
+                advised = float(r.get("retry_after_s") or 0)
+                remaining = float(r.get("ts", 0)) + advised - now_ts
+                if remaining <= 0:
+                    # The advised wait has elapsed: evaluate normally (F9).
+                    return False, (True, None)
                 return False, (False, {
-                    "retry_after_s": r.get("retry_after_s", SPAWN_SPACING_S),
+                    "retry_after_s": max(1.0, remaining),
                     "reason": r.get("reason", "slot unavailable")})
         return False, (True, None)
     locked, dup = _with_spawn_state(_check_duplicate)
@@ -1000,7 +1006,7 @@ def launch_gate(
             f"this exact {kind} command unchanged."
         )
         if slot.get("duplicate_suppressed"):
-            guidance += " (duplicate request suppressed; slot still held)"
+            guidance += " (duplicate request suppressed: re-sent before the advised wait elapsed)"
         return {
             "granted": False,
             "code": 6,
