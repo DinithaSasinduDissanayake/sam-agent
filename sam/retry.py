@@ -171,13 +171,17 @@ def record_failure(agent_id, error_message):
 
 
 def parse_reset_seconds(text):
-    """Parse 'Resets in 18m6s' / '21m23s' / '45s' hints. None when absent.
+    """Parse 'Resets in 1h2m3s' / '18m6s' / '45s' / '2h' hints. None when absent.
 
     Advisory only: callers must cap and jitter the result.
     """
     if not text:
         return None
     import re
+    m = re.search(r"Resets in\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s)?", text)
+    if m and any(m.groups()):
+        h, mi, s = (int(g) if g else 0 for g in m.groups())
+        return h * 3600 + mi * 60 + s
     m = re.search(r"(\d+)\s*m(?:in)?\s*(\d+)\s*s", text)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
@@ -192,6 +196,7 @@ def parse_reset_seconds(text):
 
 def detect_infra_failure(result, log_text=None):
     """Classify a terminal run's failure.
+    Results carrying an ``infra_hint`` key (opencode wrapper) are classified from that key only.
 
     Returns (kind, error_text) where kind is one of:
       "quota"          — 429 RESOURCE_EXHAUSTED (any duration)
@@ -207,6 +212,18 @@ def detect_infra_failure(result, log_text=None):
         # clean exit or unknown — not an infra death
         if result.get("final_state_hint") != "failed":
             return None, ""
+    if "infra_hint" in result:
+        # Wrapper-classified (opencode): trust it, never grep model text.
+        hint = result.get("infra_hint")
+        hint_err = str(result.get("error") or "")
+        if hint == "quota":
+            return "quota", (hint_err or "quota")
+        if hint == "startup-network":
+            hint_ms = result.get("duration_ms")
+            hint_s = (hint_ms / 1000.0) if isinstance(hint_ms, (int, float)) else None
+            if hint_s is None or hint_s <= STARTUP_DEATH_S:
+                return "startup-network", (hint_err or "startup-network")
+        return None, ""
     err = str(result.get("error") or "")
     resp = str(result.get("result") or "")
     dur_ms = result.get("duration_ms")
