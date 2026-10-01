@@ -51,9 +51,18 @@ def _writeback_terminals(updates):
             promotions = []
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for a in registry.get("agents", []):
-                rid = updates.get(a.get("id"))
-                if rid is None:
+                val = updates.get(a.get("id"))
+                if val is None:
                     continue
+                if isinstance(val, tuple):
+                    rid, snap_run_id, snap_pid = val
+                    a_run = a.get("run_id") or a.get("run_count") or 1
+                    if snap_run_id is not None and a_run != snap_run_id:
+                        continue
+                    if snap_pid is not None and a.get("pid") != snap_pid:
+                        continue
+                else:
+                    rid = val
                 if (rid == "failed" or a.get("state") == "failed"):
                     promoted, item = sam_retry.promote_if_infra(a)
                     if promoted and item is not None:
@@ -538,7 +547,11 @@ def run(args):
             entry["resolved_state"] = "failed"
             resolved = "failed"
         if resolved in sam_state.TERMINAL_STATES and resolved != a.get("state"):
-            updates[a.get("id")] = resolved
+            updates[a.get("id")] = (
+                resolved,
+                a.get("run_id") or a.get("run_count") or 1,
+                a.get("pid"),
+            )
         resolved_list.append(entry)
 
     _writeback_terminals(updates)

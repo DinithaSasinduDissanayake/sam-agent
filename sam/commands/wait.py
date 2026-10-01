@@ -116,18 +116,25 @@ def run(args):
                 # Spec: exit 4, state killed — persist it (the wrapper
                 # never gets to write a result after SIGKILL).
                 try:
+                    snap_run_id = agent.get("run_id") or agent.get("run_count") or 1
+                    snap_pid = agent.get("pid")
                     with sam_locks.registry_lock(exclusive=True, timeout=10):
                         reg = sam_registry.load_registry()
                         for a in reg.get("agents", []):
                             if a.get("id") == agent_id:
+                                a_run = a.get("run_id") or a.get("run_count") or 1
+                                if snap_run_id is not None and a_run != snap_run_id:
+                                    break
+                                if snap_pid is not None and a.get("pid") != snap_pid:
+                                    break
                                 if a.get("state") not in sam_state.TERMINAL_STATES:
                                     a["state"] = "killed"
                                     a["killed_reason"] = "wait_kill_after"
                                     a["updated_at"] = datetime.now(
                                         timezone.utc).strftime(
                                         "%Y-%m-%dT%H:%M:%SZ")
+                                sam_registry.save_registry(reg)
                                 break
-                        sam_registry.save_registry(reg)
                 except Exception:
                     pass
                 if timeout > 0:
@@ -158,8 +165,10 @@ def run(args):
         # Persist terminal state and promote if infra
         retry_item = None
         if current_state in sam_state.TERMINAL_STATES or current_state in ("completed", "failed"):
+            snap_run_id = agent.get("run_id") or agent.get("run_count") or 1
+            snap_pid = agent.get("pid")
             final_state, retry_item = sam_retry.reconcile_terminal(
-                agent_id, snap_run_id=agent.get("run_id"), snap_pid=agent.get("pid"),
+                agent_id, snap_run_id=snap_run_id, snap_pid=snap_pid,
                 terminal_state=current_state
             )
             if final_state is not None:

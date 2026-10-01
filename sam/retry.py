@@ -277,7 +277,8 @@ def reconcile_terminal(agent_id, snap_run_id=None, snap_pid=None, terminal_state
         if not target:
             return None, None
 
-        if snap_run_id is not None and target.get("run_id") != snap_run_id:
+        target_run_id = target.get("run_id") or target.get("run_count") or 1
+        if snap_run_id is not None and target_run_id != snap_run_id:
             return target.get("state"), find_for(agent_id)
         if snap_pid is not None and target.get("pid") != snap_pid:
             return target.get("state"), find_for(agent_id)
