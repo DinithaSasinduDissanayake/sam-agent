@@ -28,6 +28,7 @@ from sam import proc as sam_proc
 from sam import registry as sam_registry
 from sam import retry as sam_retry
 from sam import run_times as sam_run_times
+from sam import state as sam_state
 
 
 def _parse_iso(value):
@@ -52,22 +53,38 @@ def _spawn_events(agents, cutoff):
 
 
 def _interval(entry, now_dt):
+    """(start, end) of the entry's current run, or None without a start.
+
+    End, in order: recorded end (result.json ended_at, registry ended_at /
+    completed_at); `now` only while the run is genuinely live (resolved
+    running/spawning); else start + duration_ms; else the newest mtime of
+    output.log / result.json; else start. A dead run is never counted as
+    still running (that produced phantom OVER-CAP rows).
+    """
     start = sam_run_times.run_started_at(entry)
     if start is None:
         return None
     end = sam_run_times.run_ended_at(entry)
     if end is None:
-        if entry.get("state") in ("completed", "failed", "killed",
-                                  "partial", "awaiting_retry"):
-            # terminal but end unknown: treat start as the whole span? No —
-            # use duration if present.
+        live = False
+        if entry.get("state") not in sam_state.TERMINAL_STATES:
+            try:
+                run_id = entry.get("run_id") or entry.get("run_count") or 1
+                live = sam_state.resolve_agent_state(entry, run_id) in ("running", "spawning")
+            except Exception:
+                live = False
+        if live:
+            end = now_dt
+        else:
             dur = entry.get("duration_ms")
-            if isinstance(dur, (int, float)):
+            if isinstance(dur, (int, float)) and not isinstance(dur, bool) and dur >= 0:
                 end = start + timedelta(milliseconds=dur)
             else:
-                end = start
-        else:
-            end = now_dt
+                end = sam_run_times.run_end_evidence(entry) or start
+    if end < start:
+        end = start
+    if end > now_dt >= start:
+        end = now_dt
     return start, end
 
 

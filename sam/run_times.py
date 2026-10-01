@@ -1,6 +1,7 @@
 """Read-only authoritative current-run timestamps for status and dashboards."""
 
 import json
+import os
 from datetime import datetime, timezone
 
 
@@ -49,3 +50,24 @@ def run_ended_at(entry):
     return (parse_timestamp(read_run_result(entry).get("ended_at"))
             or parse_timestamp(entry.get("ended_at"))
             or parse_timestamp(entry.get("completed_at")))
+
+
+def file_mtime(path):
+    """UTC datetime of a file's mtime; None when missing/unreadable."""
+    try:
+        return datetime.fromtimestamp(os.stat(path).st_mtime, timezone.utc)
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def run_end_evidence(entry):
+    """Newest mtime of the run's output.log / result.json, else None.
+
+    Offline evidence of when a run that has no recorded end last did
+    anything. Used by doctor (and kill) for dead runs; never used for live
+    runs and never by status/TUI DONE columns.
+    """
+    stamps = [file_mtime(entry.get(k)) for k in ("log_path", "result_path")
+              if entry.get(k)]
+    stamps = [s for s in stamps if s is not None]
+    return max(stamps) if stamps else None
