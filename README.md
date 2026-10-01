@@ -7,6 +7,11 @@ Prevents orphaned processes, lost PIDs, and unreliable `nohup` + `&` workflows.
 
 > **Are you an AI agent? Stop reading this and read [`SKILL.md`](SKILL.md) instead.**
 
+> **Wondering why SAM has a spawn limiter, retry queue, `partial` state, inverted `wait`,
+> `doctor`, and proc-based liveness?** They are scars, not speculation — see
+> [`docs/WHY-2026-10-01-failure-fixes.md`](docs/WHY-2026-10-01-failure-fixes.md)
+> for the empirical evidence and full reasoning.
+
 ---
 
 ## Install

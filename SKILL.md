@@ -1,6 +1,14 @@
 ---
 name: sam
-description: Spawn and resume detached pi/agy workers via SAM CLI from any invoker. Use when asked to run background workers, continue a worker with a follow-up task, or inspect worker status and final results. Spawn-and-forget is the default.
+description: >
+  Multi-agent orchestration layer for background sub-agents. Pull this skill
+  whenever the user mentions SAM or any of its commands (spawn, wait, status,
+  resume, retry, kill, restart, doctor, tui), asks to dispatch/run background
+  workers or sub-agents, use spawn-and-forget orchestration, check on running,
+  stalled, or failed agents, continue a worker with a follow-up task, or when
+  background jobs fail, stall, hit rate limits, or exhaust quota. Also pull it
+  before writing any script or loop that launches pi/agy workers directly.
+disable-model-invocation: false
 ---
 # SKILL.md — SAM: Sub-Agent Manager
 
@@ -344,6 +352,25 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
 5. **Handle timeout:** `--kill-after N` attempts termination and persists `killed`; a plain wait (or a deprecated `--timeout N` detach) never signals. Check compact status before deciding whether a further kill or continuation is necessary.
 
 6. **Ignore sentinels:** Lines like `##PI_BEGIN_a1b2c3d4` and `##PI_END_a1b2c3d4` are SAM framing markers. They are stripped by default in `sam logs`. Use `--raw` to see them.
+
+---
+
+## Model & reasoning policy
+
+Defaults are chosen for cost, not capability:
+
+1. **Spawn workers on the latest cheapest flash model with low reasoning.**
+   For `agy` that is currently `gemini-3.8-flash-low` (SAM's builtin default).
+   **Never use Pro/high-tier models** (e.g. `gemini-3.1-pro-high`) or raise
+   the effort/thinking level unless the user explicitly asks for it in this
+   conversation.
+2. **Flash model numbers move.** If you are unsure whether a flash newer than
+   the documented one exists (e.g. newer than 3.8-flash), or the builtin
+   default looks stale, **ask the user instead of guessing** — they will
+   usually tell you to update the default.
+3. **User overrides always win.** An explicit `--model`, `--effort`,
+   `--thinking`, or `$SAM_MODEL` supplied by the user supersedes this policy
+   for that run.
 
 ---
 
