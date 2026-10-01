@@ -16,6 +16,7 @@ _SAM_PKG = _THIS_DIR.parent
 if str(_SAM_PKG) not in sys.path:
     sys.path.insert(0, str(_SAM_PKG))
 
+from sam import locks as sam_locks
 from sam import registry as sam_registry
 from sam import state as sam_state
 
