@@ -17,12 +17,13 @@ def isolated_process_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SAM_HOME", str(home / ".sam"))
     for key in ("SAM_MODEL", "SAM_HARNESS", "SAM_AGENT_ID", "SAM_DEPTH",
-                "SAM_PARENT_ID", "SAM_ROOT_ID", "SAM_TUI_SHOW_ARCHIVED"):
+                "SAM_PARENT_ID", "SAM_ROOT_ID", "SAM_TUI_SHOW_ARCHIVED",
+                "SAM_MODEL_HARNESS"):
         monkeypatch.delenv(key, raising=False)
     # Accidental unmocked workers fail locally instead of consuming live quota.
     guard = tmp_path / "guard-bin"
     guard.mkdir()
-    for name in ("pi", "agy"):
+    for name in ("pi", "agy", "opencode"):
         exe = guard / name
         exe.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(99)\n")
         exe.chmod(0o700)

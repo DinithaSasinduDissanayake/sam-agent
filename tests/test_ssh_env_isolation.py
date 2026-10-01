@@ -53,10 +53,18 @@ def test_build_child_env_strips_ssh_and_preserves_auth_sock(monkeypatch):
 def test_build_child_env_sets_dbus_if_missing(monkeypatch):
     monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
     bus_path = f"/run/user/{os.getuid()}/bus"
+    real_exists = os.path.exists
 
+    monkeypatch.setattr(sam_util.os.path, "exists",
+                        lambda p: True if p == bus_path else real_exists(p))
     env = sam_util.build_child_env("agent-test", "test-model", 0)
-    if os.path.exists(bus_path):
-        assert env.get("DBUS_SESSION_BUS_ADDRESS") == f"unix:path={bus_path}"
+    assert env.get("DBUS_SESSION_BUS_ADDRESS") == f"unix:path={bus_path}"
+
+    monkeypatch.setattr(sam_util.os.path, "exists",
+                        lambda p: False if p == bus_path else real_exists(p))
+    env = sam_util.build_child_env("agent-test", "test-model", 0)
+    assert "DBUS_SESSION_BUS_ADDRESS" not in env
+
 
 
 def test_agy_wrapper_strips_ssh_keys_from_child(tmp_path, monkeypatch):

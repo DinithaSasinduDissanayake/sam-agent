@@ -13,6 +13,7 @@ import argparse
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 from contextlib import redirect_stdout, redirect_stderr
