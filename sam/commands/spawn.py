@@ -236,6 +236,7 @@ def run(args):
             return 6
         spawn_waited_s = round(slot.get("waited_s", 0.0), 1)
         spacing_bypassed = bool(slot.get("bypassed", False))
+        spawn_fail_open = bool(slot.get("fail_open", False))
 
         # 1-15: Lock sequence
         try:
@@ -290,9 +291,10 @@ def run(args):
                         "duration_ms": None, "restart_count": 0,
                         "killed_reason": None,
                         "launch_deadline_at": deadline,
-                    "spawn_waited_s": spawn_waited_s,
-                    "spacing_bypassed": spacing_bypassed,
-                    "quota_override_reason": override_reason,
+                        "spawn_waited_s": spawn_waited_s,
+                        "spacing_bypassed": spacing_bypassed,
+                        "fail_open": spawn_fail_open,
+                        "quota_override_reason": override_reason,
                 }
                     registry["agents"].append(entry)
                     sam_registry.save_registry(registry)

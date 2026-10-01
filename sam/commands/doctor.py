@@ -114,6 +114,7 @@ def collect(window_hours=24.0, now=None):
             "gap_s": None if gap is None else round(gap, 3),
             "concurrency_at_spawn": conc,
             "spacing_bypassed": bypass,
+            "fail_open": bool(a.get("fail_open")),
             "spawn_waited_s": a.get("spawn_waited_s"),
             "quota_override_reason": a.get("quota_override_reason"),
         }
@@ -194,6 +195,8 @@ def run(args):
                              else f"bypassed({r['gap_s']}s)")
             if r["concurrency_at_spawn"] > thr["max_running"]:
                 flags.append(f"OVER-CAP({r['concurrency_at_spawn']})")
+            if r.get("fail_open"):
+                flags.append("FAIL-OPEN")
             if r.get("quota_override_reason"):
                 flags.append(f"override: {r['quota_override_reason']}")
             mark = " ".join(flags)

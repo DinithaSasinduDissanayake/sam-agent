@@ -399,7 +399,7 @@ def _slot_status(now, state, running):
     return True, 0.0, "slot available"
 
 
-def _with_spawn_state(fn):
+def _with_spawn_state(fn, timeout_s=5.0):
     """Run fn(state) under the spawn lock; save state if fn returns True.
 
     The lock is held only for the (fast) read-modify-write critical
@@ -411,14 +411,27 @@ def _with_spawn_state(fn):
     lock_path = _spawn_lock_path()
     try:
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
     except OSError:
         return False, None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
+        deadline = time.monotonic() + timeout_s
+        acquired = False
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except InterruptedError:
+                continue
+            except OSError:
+                return False, None
+        if not acquired:
             return False, None
+
         try:
             state = _load_spawn_state()
             save, result = fn(state)
@@ -477,7 +490,7 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     def _fail_open(reason):
         return {"granted": True, "waited_s": 0.0, "retry_after_s": 0.0,
                 "reason": reason, "duplicate_suppressed": False,
-                "bypassed": False}
+                "bypassed": False, "fail_open": True}
 
     if no_space:
         def _do_bypass(state):
@@ -490,7 +503,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
             return _fail_open("spawn lock unavailable; fail-open")
         return {"granted": True, "waited_s": 0.0, "retry_after_s": 0.0,
                 "reason": "spacing bypassed (--no-space experiment flag)",
-                "duplicate_suppressed": False, "bypassed": True}
+                "duplicate_suppressed": False, "bypassed": True,
+                "fail_open": False}
 
     # Retry-spam guard: identical request recently deferred?
     # Inner result is always a (proceed, info) pair nested inside the
@@ -502,7 +516,7 @@ def acquire_spawn_slot(name, task, model, no_space=False,
                 return False, (False, {
                     "retry_after_s": r.get("retry_after_s", SPAWN_SPACING_S),
                     "reason": r.get("reason", "slot unavailable")})
-        return True, (True, None)
+        return False, (True, None)
     locked, dup = _with_spawn_state(_check_duplicate)
     if not locked:
         return _fail_open("spawn lock unavailable; fail-open")
@@ -511,7 +525,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
         return {"granted": False, "waited_s": 0.0,
                 "retry_after_s": dup_info["retry_after_s"],
                 "reason": dup_info["reason"],
-                "duplicate_suppressed": True, "bypassed": False}
+                "duplicate_suppressed": True, "bypassed": False,
+                "fail_open": False}
 
     def _live_running():
         if count_running is not None:
@@ -539,7 +554,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     if granted:
         return {"granted": True, "waited_s": time.time() - start,
                 "retry_after_s": 0.0, "reason": reason,
-                "duplicate_suppressed": False, "bypassed": False}
+                "duplicate_suppressed": False, "bypassed": False,
+                "fail_open": False}
 
     # Slot busy: poll (lock-free sleeps) until grant or deadline.
     while time.time() < deadline:
@@ -553,7 +569,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
         if granted:
             return {"granted": True, "waited_s": time.time() - start,
                     "retry_after_s": 0.0, "reason": reason,
-                    "duplicate_suppressed": False, "bypassed": False}
+                    "duplicate_suppressed": False, "bypassed": False,
+                    "fail_open": False}
 
     def _record_deferral(state):
         _record_request(state, name, task, model, False,
@@ -562,4 +579,5 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     _with_spawn_state(_record_deferral)
     return {"granted": False, "waited_s": time.time() - start,
             "retry_after_s": retry_after, "reason": reason,
-            "duplicate_suppressed": False, "bypassed": False}
+            "duplicate_suppressed": False, "bypassed": False,
+            "fail_open": False}
