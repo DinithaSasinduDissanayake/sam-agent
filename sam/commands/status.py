@@ -77,7 +77,7 @@ _ANSI_YELLOW = "\033[33m"
 _ANSI_RESET = "\033[0m"
 
 _HINT_LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
-                "no result.json (check logs/result). AGE = elapsed since created_at.")
+                "no result.json (check logs/result). AGE = elapsed since current-run start.")
 
 
 def _use_color():
@@ -133,7 +133,8 @@ def _parse_ts(value):
 
 
 def _elapsed_seconds(entry):
-    dt = _parse_ts(entry.get("created_at"))
+    from sam.run_times import run_started_at
+    dt = run_started_at(entry)
     if dt is None:
         return None
     try:
@@ -254,6 +255,7 @@ def _print_activity_detail(act, indent=""):
     ss = act.get("session") or {}
     lg = act.get("log") or {}
     watch = act.get("watch")
+    print(f"{indent}Liveness: {_fmt_liveness(act.get('liveness'))}")
     print(f"{indent}Activity: {st}")
     print(f"{indent}  lifecycle: {act.get('lifecycle_state', '?')}")
     if ss.get("error"):
@@ -310,8 +312,13 @@ def _print_activity_detail(act, indent=""):
 def _compute_activity(agent, resolved, stall_seconds, watch):
     """Activity block for one agent; never raises."""
     try:
-        return sam_activity.compute_agent_activity(
+        out = sam_activity.compute_agent_activity(
             agent, resolved, stall_seconds=stall_seconds, watch=watch)
+        try:
+            out["liveness"] = sam_activity.summarize_liveness(out)
+        except Exception:
+            pass
+        return out
     except Exception as e:  # defensive: analysis must never fail status
         return {
             "lifecycle_state": resolved,
@@ -319,6 +326,18 @@ def _compute_activity(agent, resolved, stall_seconds, watch):
             "evidence": ["activity analysis failed: %s" % e],
             "error": str(e),
         }
+
+
+def _fmt_liveness(liv):
+    """Compact `verdict age (signal)` cell, e.g. `active 12s (log)`."""
+    if not isinstance(liv, dict):
+        return "?"
+    verdict = liv.get("verdict", "?")
+    age = liv.get("age")
+    signal = liv.get("signal", "?")
+    if age is None:
+        return "%s" % verdict
+    return "%s %s (%s)" % (verdict, _fmt_age(age), signal)
 
 
 def run(args):

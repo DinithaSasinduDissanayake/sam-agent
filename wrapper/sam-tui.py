@@ -31,14 +31,15 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-REGISTRY = os.path.expanduser("~/.sam/registry.json")
+REGISTRY = os.path.join(os.path.expanduser(os.environ.get("SAM_HOME", "~/.sam")), "registry.json")
 REFRESH_SEC = 2
 RECENT_DAYS = 7
 RECENT_LIMIT = 20
 
 LEGEND = ("Hints: failed! needs attention; unknown?stale = PID dead/recycled, "
-          "no result.json (check logs/result). AGE = since created_at; "
-          "DONE = since done (terminal) else -; "
+          "no result.json (check logs/result). AGE = since current-run start; "
+          "DONE = since done (result ended_at) else -; ACT = motion "
+          "(▲active ▬idle !stalled …starting, from file-write age); "
           "Model shows [thinking] (pi) or [effort:X] (agy, when overridden).")
 
 TERMINAL_STATES = frozenset({"completed", "failed", "killed"})
@@ -82,10 +83,25 @@ def _fmt_dur(secs):
     return "%dd%02dh" % (days, rem_h) if rem_h else "%dd" % days
 
 
+def _run_start(entry):
+    from sam.run_times import run_started_at
+    dt = run_started_at(entry)
+    return dt.isoformat() if dt is not None else None
+
+
+def _result_ended_at(entry):
+    """Authoritative finish time of the current run, or None.
+
+    Read-only read of the current run's result.json `ended_at` (epoch
+    seconds as written by the wrappers, ISO string accepted). Never falls
+    back to mutable registry `updated_at`, which status/archive rewrites.
+    """
+    from sam.run_times import run_ended_at
+    return run_ended_at(entry)
+
+
 def _fmt_age(entry):
-    dt = _parse_ts(entry.get("created_at"))
-    if dt is None:
-        return "-"
+    dt = _parse_ts(_run_start(entry))
     try:
         secs = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
     except Exception:
@@ -96,7 +112,10 @@ def _fmt_age(entry):
 def _fmt_done(entry, state):
     if state not in TERMINAL_STATES:
         return "-"
-    dt = _parse_ts(entry.get("completed_at") or entry.get("updated_at"))
+    # DONE = since the current run actually finished (result.json ended_at).
+    # Missing/unreadable finish time shows "-" (unknown) — never guessed
+    # from updated_at.
+    dt = _result_ended_at(entry)
     if dt is None:
         return "-"
     try:
@@ -121,7 +140,7 @@ def _fmt_model(entry):
     thinking = entry.get("thinking")
     if thinking:
         return f"{model} [{thinking}]"
-    return model
+    return f"{model} [unknown]"
 
 
 def _fmt_state(state):
@@ -132,8 +151,31 @@ def _fmt_state(state):
     return state or "?"
 
 
+def _fmt_act(entry, state):
+    """Compact motion cell from stat-only liveness (no tail reads)."""
+    try:
+        from sam.activity import quick_liveness
+        liv = quick_liveness(entry, state)
+    except Exception:
+        return "-"
+    verdict = liv.get("verdict", "?")
+    if verdict in ("completed", "failed", "killed", "spawning",
+                   "unknown"):
+        return "-"
+    age = liv.get("age")
+    if verdict == "active":
+        return "▲%s" % _fmt_dur(age) if age is not None else "▲"
+    if verdict == "idle":
+        return "▬%s" % _fmt_dur(age) if age is not None else "▬"
+    if verdict == "stalled?":
+        return "!%s" % _fmt_dur(age) if age is not None else "!"
+    if verdict == "quiet-start":
+        return "…"
+    return verdict
+
+
 def _age_days(entry):
-    dt = _parse_ts(entry.get("created_at"))
+    dt = _parse_ts(_run_start(entry))
     if dt is None:
         return 0.0  # unknown age counts as recent (don't hide)
     try:
@@ -145,7 +187,7 @@ def _age_days(entry):
 
 
 def _sort_key(entry):
-    dt = _parse_ts(entry.get("created_at"))
+    dt = _parse_ts(_run_start(entry))
     if dt is None:
         return ""
     try:
@@ -173,10 +215,10 @@ def _load_agents(show_archived=False):
     # Recent default: active (running/unknown <7d) + last 20
     # completed/failed newest-first (created_at desc).
     active = [e for e in resolved
-              if e["resolved_state"] in ("running", "unknown")
+               if e["resolved_state"] in ("spawning", "running", "unknown")
               and _age_days(e) < RECENT_DAYS]
     terminals = [e for e in resolved
-                 if e["resolved_state"] in ("completed", "failed")]
+                  if e["resolved_state"] in TERMINAL_STATES]
     terminals.sort(key=_sort_key, reverse=True)
     recent_terminals = terminals[:RECENT_LIMIT]
     seen = {id(e) for e in active}
@@ -219,6 +261,7 @@ def build_dashboard(show_archived=False):
     table.add_column("", width=2)  # status icon
     table.add_column("Agent", style="cyan", no_wrap=True)
     table.add_column("State")
+    table.add_column("ACT", justify="right", no_wrap=True)
     table.add_column("AGE", justify="right", no_wrap=True)
     table.add_column("DONE", justify="right", no_wrap=True)
     table.add_column("Runs", justify="right")
@@ -248,6 +291,7 @@ def build_dashboard(show_archived=False):
             f"[{style}]{icon}[/]",
             a.get("name", "?"),
             f"[{style}]{_fmt_state(state)}[/]",
+            _fmt_act(a, state),
             _fmt_age(a),
             _fmt_done(a, state),
             str(runs),

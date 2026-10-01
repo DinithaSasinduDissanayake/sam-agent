@@ -701,3 +701,91 @@ def compute_agent_activity(agent, lifecycle_state,
             "log": deltas["log"],
         }
     return out
+
+
+def summarize_liveness(act):
+    """Compact single-sample liveness verdict from a computed activity block.
+
+    Answers "working or stuck?" without waiting and without spawning a
+    checker: verdict is one of active (signal within active window),
+    idle (signal within stall threshold), stalled (no signal beyond
+    threshold), working (unresolved tool calls outstanding), or the
+    lifecycle state itself for terminal/spawning/unknown/error rows.
+    Returns {"verdict", "signal", "age"}; age is seconds or None.
+    """
+    state = (act or {}).get("activity_state", "?")
+    if state in ("completed", "failed", "killed", "spawning",
+                 "unknown", "error"):
+        return {"verdict": state, "signal": "lifecycle", "age": None}
+    if state == "tool_pending":
+        pending = ((act.get("session") or {}).get("pending_tool_call_ids")
+                   or [])
+        return {"verdict": "working",
+                "signal": "tool:%s" % (pending[0] if pending else "pending"),
+                "age": None}
+    signals = []
+    ss = act.get("session") or {}
+    lg = act.get("log") or {}
+    if ss.get("exists") and ss.get("last_event_age") is not None:
+        try:
+            signals.append(("session", float(ss["last_event_age"])))
+        except (TypeError, ValueError):
+            pass
+    if lg.get("exists") and lg.get("mtime_age") is not None:
+        try:
+            signals.append(("log", float(lg["mtime_age"])))
+        except (TypeError, ValueError):
+            pass
+    if not signals:
+        return {"verdict": "quiet-start" if state == "waiting_or_idle"
+                else state,
+                "signal": "nofiles", "age": None}
+    kind, age = min(signals, key=lambda x: x[1])
+    if state == "active_recent_event":
+        verdict = "active"
+    elif state == "waiting_or_idle":
+        verdict = "idle"
+    else:
+        verdict = "stalled?"
+    return {"verdict": verdict, "signal": kind, "age": age}
+
+
+def quick_liveness(agent, lifecycle_state,
+                   stall_seconds=DEFAULT_STALL_SECONDS,
+                   active_window=DEFAULT_ACTIVE_WINDOW, now=None):
+    """Stat-only liveness for dashboards (no tail reads, no waiting).
+
+    Same verdict vocabulary as summarize_liveness() but derived from
+    file mtimes/sizes alone, so per-refresh cost is two stat() calls.
+    Terminal/spawning/unknown lifecycle states pass through unchanged.
+    """
+    now = time.time() if now is None else now
+    if lifecycle_state in ("completed", "failed", "killed",
+                           "spawning", "unknown"):
+        return {"verdict": lifecycle_state, "signal": "lifecycle",
+                "age": None}
+    signals = []
+    size = None
+    for key, kind in (("log_path", "log"), ("session_path", "session")):
+        path = agent.get(key)
+        if not path:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        signals.append((kind, max(0.0, now - st.st_mtime)))
+        if kind == "log":
+            size = st.st_size
+    if not signals:
+        return {"verdict": "quiet-start", "signal": "nofiles",
+                "age": None}
+    kind, age = min(signals, key=lambda x: x[1])
+    if age <= active_window:
+        verdict = "active"
+    elif age <= stall_seconds:
+        verdict = "idle"
+    else:
+        verdict = "stalled?"
+    return {"verdict": verdict, "signal": kind, "age": age,
+            "log_size": size}

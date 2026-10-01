@@ -678,3 +678,73 @@ class TestStatusCommand:
         assert code == 1
         err = capsys.readouterr().err
         assert "agent not found" in err
+
+
+class TestLivenessSummary:
+    def test_terminal_passthrough(self):
+        for state in ("completed", "failed", "killed", "spawning",
+                      "unknown", "error"):
+            liv = sam_activity.summarize_liveness(
+                {"activity_state": state})
+            assert liv["verdict"] == state
+            assert liv["age"] is None
+
+    def test_tool_pending_is_working(self):
+        liv = sam_activity.summarize_liveness({
+            "activity_state": "tool_pending",
+            "session": {"pending_tool_call_ids": ["call_1"]},
+            "log": {}})
+        assert liv["verdict"] == "working"
+        assert "call_1" in liv["signal"]
+
+    def test_active_idle_stalled_mapping(self):
+        assert sam_activity.summarize_liveness({
+            "activity_state": "active_recent_event",
+            "session": {"exists": True, "last_event_age": 12},
+            "log": {"exists": True, "mtime_age": 30},
+        })["verdict"] == "active"
+        assert sam_activity.summarize_liveness({
+            "activity_state": "waiting_or_idle",
+            "session": {"exists": True, "last_event_age": 200},
+            "log": {"exists": True, "mtime_age": 200},
+        })["verdict"] == "idle"
+        liv = sam_activity.summarize_liveness({
+            "activity_state": "possibly_stalled",
+            "session": {"exists": True, "last_event_age": 900},
+            "log": {"exists": True, "mtime_age": 900},
+        })
+        assert liv["verdict"] == "stalled?"
+        assert liv["age"] == 900
+
+    def test_no_files_quiet_start(self):
+        liv = sam_activity.summarize_liveness({
+            "activity_state": "waiting_or_idle",
+            "session": {"exists": False}, "log": {"exists": False}})
+        assert liv["verdict"] == "quiet-start"
+
+
+class TestQuickLiveness:
+    def test_terminal_passthrough(self):
+        liv = sam_activity.quick_liveness({}, "completed")
+        assert liv["verdict"] == "completed"
+
+    def test_active_idle_stalled_by_mtime(self, tmp_path):
+        log = tmp_path / "output.log"
+        log.write_bytes(b"x" * 100)
+        agent = {"log_path": str(log), "session_path": None}
+        now = time.time()
+        assert sam_activity.quick_liveness(
+            agent, "running", now=now)["verdict"] == "active"
+        old = now - 400
+        os.utime(str(log), (old, old))
+        assert sam_activity.quick_liveness(
+            agent, "running", now=now)["verdict"] == "stalled?"
+        mid = now - 120
+        os.utime(str(log), (mid, mid))
+        assert sam_activity.quick_liveness(
+            agent, "running", now=now)["verdict"] == "idle"
+
+    def test_no_files(self):
+        liv = sam_activity.quick_liveness(
+            {"log_path": None, "session_path": None}, "running")
+        assert liv["verdict"] == "quiet-start"
