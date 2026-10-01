@@ -83,6 +83,11 @@ def run(args):
         if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
             return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
+        # Pre-flight continuation check: don't burn launch slot if session is missing
+        session_path = agent.get("session_path")
+        if harness == "pi" and (not session_path or not os.path.isfile(session_path)):
+            return _emit(1, f"session file not found: {session_path}", as_json)
+
         gate_res = sam_proc.launch_gate(
             name=agent_name,
             task=str(task_path),

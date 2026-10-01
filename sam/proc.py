@@ -704,6 +704,25 @@ def load_launches(sam_home=None):
     return records
 
 
+def count_live_agents():
+    """Count running agents by inspecting true state."""
+    from sam import registry as sam_registry
+    from sam import state as sam_state
+    try:
+        reg = sam_registry.load_registry()
+        n = 0
+        for a in reg.get("agents", []):
+            try:
+                if sam_state.resolve_agent_state(
+                        a, a.get("run_id", 1)) == "running":
+                    n += 1
+            except Exception:
+                continue
+        return n
+    except Exception:
+        return 0
+
+
 def launch_gate(
     name,
     task,
@@ -713,7 +732,7 @@ def launch_gate(
     no_space=False,
     is_infra_retry=False,
     wait_s=None,
-    running=0,
+    running=None,
     count_running=None,
 ):
     """Unified launch admission gate for spawn, resume, restart, and retry.
@@ -726,6 +745,11 @@ def launch_gate(
        Enforces global >=15s spacing and max 4 running agents via
        acquire_spawn_slot. Bounded wait up to wait_s.
     """
+    if count_running is None:
+        count_running = count_live_agents
+    if running is None:
+        running = count_running()
+
     from sam import retry as sam_retry
 
     # 1. Quota breaker

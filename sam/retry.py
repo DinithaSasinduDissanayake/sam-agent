@@ -23,6 +23,7 @@ import time
 from sam import config as sam_config
 
 QUEUE_FILE = "retry_queue.json"
+DEAD_FILE = "retry_dead.json"
 
 #: Parsed "Resets in" values above this are distrusted (weather cap).
 MAX_RESET_ADVISORY_S = 1800
@@ -90,6 +91,83 @@ def save_queue(items):
             pass
     except OSError as e:
         raise RuntimeError(f"retry queue write failed: {e}")
+
+
+def dead_path():
+    return sam_config.get_sam_home() / DEAD_FILE
+
+
+def load_dead():
+    p = dead_path()
+    if not p.is_file():
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            content = f.read()
+        if not content.strip():
+            return []
+        data = json.loads(content)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_dead(items):
+    import tempfile
+    path = dead_path()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=path.parent, prefix="retry_dead.", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=1)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        raise RuntimeError(f"retry dead queue write failed: {e}")
+
+
+def record_failure(agent_id, error_message):
+    """Record a failed fire attempt for a queued item.
+
+    Increments attempts. If attempts >= 3, moves the item from
+    retry_queue.json to retry_dead.json.
+    Returns (attempts, moved_to_dead).
+    """
+    from sam import locks as sam_locks
+    with sam_locks.retry_queue_lock(exclusive=True, timeout=10):
+        items = load_queue()
+        target = None
+        for i in items:
+            if i.get("agent_id") == agent_id:
+                target = i
+                break
+        if target is None:
+            return 0, False
+        attempts = int(target.get("attempts", 0)) + 1
+        target["attempts"] = attempts
+        target["last_error"] = str(error_message)[:300]
+        if attempts >= 3:
+            kept = [i for i in items if i.get("agent_id") != agent_id]
+            save_queue(kept)
+            dead = load_dead()
+            dead_item = dict(target)
+            dead_item["dead_at"] = time.time()
+            dead.append(dead_item)
+            save_dead(dead)
+            return attempts, True
+        else:
+            save_queue(items)
+            return attempts, False
 
 
 def parse_reset_seconds(text):

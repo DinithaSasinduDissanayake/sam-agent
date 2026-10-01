@@ -137,21 +137,6 @@ def run(args):
         # headcount is fine, same-instant spawn bursts kill. Enforced in
         # code because nested spawners ignore skill prose. Blocks up to
         # ~45 s for a slot, then defers with re-run instructions.
-        def _count_live():
-            try:
-                reg = sam_registry.load_registry()
-                n = 0
-                for a in reg.get("agents", []):
-                    try:
-                        if sam_state.resolve_agent_state(
-                                a, a.get("run_id", 1)) == "running":
-                            n += 1
-                    except Exception:
-                        continue
-                return n
-            except Exception:
-                return 0
-
         no_space = bool(getattr(args, "no_space", False))
         override_reason = (getattr(args, "override_reason", None)
                            or "").strip() or None
@@ -179,8 +164,6 @@ def run(args):
             override_reason=override_reason,
             no_space=no_space,
             is_infra_retry=False,
-            running=_count_live(),
-            count_running=_count_live,
         )
         if not gate_res["granted"]:
             return sam_proc.emit_gate_rejection(gate_res, as_json)

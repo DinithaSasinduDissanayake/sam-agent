@@ -66,6 +66,7 @@ def _seed_agent_with_session(sam_home, agent_id, name, model="pi-model"):
         "session_path": str(session_file),
         "task_path": str(task_file),
         "result_path": str(result_file),
+        "current_run_dir": str(run_dir),
         "run_count": 1,
         "run_id": 1,
         "created_at": "2026-10-01T12:00:00Z",
@@ -148,3 +149,109 @@ def test_doctor_detects_resume_spacing_violation(sam_home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "VIOLATION" in out
     assert "[resume]" in out
+
+
+def test_resume_enforces_cap_with_four_running_agents(sam_home, monkeypatch, capsys):
+    monkeypatch.setenv("SAM_SLOT_WAIT_S", "0")
+    from sam.commands import resume as resume_cmd
+    # Seed 4 live running agents
+    reg = sam_registry.load_registry()
+    for i in range(1, 5):
+        aid = f"live-agent-{i}"
+        entry = {
+            "id": aid,
+            "name": f"live-{i}",
+            "harness": "pi",
+            "model": "model-1",
+            "state": "running",
+            "pid": os.getpid(),
+            "pgid": os.getpid(),
+            "pid_start_time": sam_proc.read_pid_start_time(os.getpid()),
+            "run_count": 1,
+            "run_id": 1,
+            "created_at": "2026-10-01T12:00:00Z",
+            "updated_at": "2026-10-01T12:00:00Z",
+        }
+        reg["agents"].append(entry)
+    sam_registry.save_registry(reg)
+
+    # Seed an agent to resume
+    _seed_agent_with_session(sam_home, "target-resume", "target-agent")
+    reg = sam_registry.load_registry()
+    for a in reg["agents"]:
+        if a["id"] == "target-resume":
+            a["state"] = "failed"
+    sam_registry.save_registry(reg)
+
+    args = argparse.Namespace(
+        id_or_name="target-agent",
+        name=None,
+        agent=None,
+        task=str(sam_home / "agents" / "target-resume" / "task.md"),
+        harness="pi",
+        model=None,
+        thinking=None,
+        effort=None,
+        cwd=None,
+        no_space=False,
+        override_reason=None,
+        json=True,
+    )
+    rc = resume_cmd.run(args)
+    assert rc == 6, f"Expected exit 6 (cap deferral), got {rc}"
+    captured = capsys.readouterr()
+    err_data = json.loads(captured.err)
+    assert err_data["status"] == "deferred"
+    assert "cap" in err_data["reason"]
+
+
+def test_retry_due_continues_past_errors_and_dead_letters(sam_home, monkeypatch, capsys):
+    monkeypatch.setenv("SAM_SLOT_WAIT_S", "0")
+    now = time.time()
+
+    # Agent 1: broken (missing session file so pi resume fails with rc 1)
+    _seed_agent_with_session(sam_home, "agent-broken", "broken-agent")
+    os.remove(sam_home / "agents" / "agent-broken" / "session.jsonl")
+    sam_retry.enqueue("agent-broken", "broken-agent", "pi-model", "quota", not_before=now - 50)
+
+    # Agent 2: valid agent that should fire
+    _seed_agent_with_session(sam_home, "agent-ok", "ok-agent")
+    sam_retry.enqueue("agent-ok", "ok-agent", "pi-model", "quota", not_before=now - 40)
+
+    class DummyProc:
+        pid = 77777
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: DummyProc())
+
+    # Run retry --due
+    args = argparse.Namespace(
+        id_or_name=None,
+        name=None,
+        due=True,
+        cancel=False,
+        override_reason=None,
+        json=True,
+    )
+    rc = retry_cmd.run(args)
+    # ok-agent should have fired despite broken-agent failing before it
+    launches = sam_proc.load_launches(sam_home)
+    launched_names = [l["name"] for l in launches]
+    assert "ok-agent" in launched_names, f"Expected ok-agent to fire, launched: {launched_names}"
+
+    # Verify agent-broken had attempt recorded
+    queue = sam_retry.load_queue()
+    b_item = next(i for i in queue if i["agent_id"] == "agent-broken")
+    assert b_item.get("attempts", 0) == 1
+    assert b_item.get("last_error") is not None
+
+    # Call --due 2 more times to trigger dead-lettering (after 3 attempts)
+    retry_cmd.run(args)
+    retry_cmd.run(args)
+
+    # agent-broken should now be removed from queue and moved to dead
+    queue_after = sam_retry.load_queue()
+    assert not any(i["agent_id"] == "agent-broken" for i in queue_after)
+    dead = sam_retry.load_dead()
+    assert any(d["agent_id"] == "agent-broken" for d in dead)

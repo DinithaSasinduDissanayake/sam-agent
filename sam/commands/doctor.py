@@ -175,6 +175,12 @@ def collect(window_hours=24.0, now=None):
             "due": isinstance(nb, (int, float)) and nb <= time.time(),
         })
 
+    dead_retries = []
+    try:
+        dead_retries = sam_retry.load_dead()
+    except Exception:
+        pass
+
     ok = not spacing_violations and not cap_violations
     return {
         "window_hours": float(window_hours),
@@ -187,6 +193,7 @@ def collect(window_hours=24.0, now=None):
         "cap_violations": cap_violations,
         "quota_overrides": overrides,
         "retry_queue": queue,
+        "dead_retries": dead_retries,
         "corrupt_retry_queues": corrupt_queues,
         "spacing_ok": ok and len(rows) > 0,
         "no_spawns": len(rows) == 0,
@@ -240,6 +247,11 @@ def run(args):
             for q in report["retry_queue"]:
                 print(f"  [{'DUE' if q['due'] else 'wait'}] {q['name']} "
                       f"kind={q['kind']} fires~{q['fires_at']}")
+        if report.get("dead_retries"):
+            print(f"dead retries: {len(report['dead_retries'])}")
+            for d in report["dead_retries"]:
+                print(f"  [DEAD] {d.get('name')} ({d.get('agent_id')}) "
+                      f"attempts={d.get('attempts', 3)}: {d.get('last_error', 'unknown')}")
         if report.get("corrupt_retry_queues"):
             print(f"corrupt retry queue: {', '.join(report['corrupt_retry_queues'])}")
         if report["no_spawns"]:
