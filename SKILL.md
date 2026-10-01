@@ -92,13 +92,14 @@ sam spawn --name <name> --task <path> [--cwd <dir>] [--model <model>] [--thinkin
 | `--harness` | No | Harness wrapper (`pi`, `agy`; default: `pi` via $SAM_HARNESS or config defaults.harness) |
 | `--effort` | No | Effort level, **agy only** (`low`, `medium`, `high`, `max`); rejected without `agy` |
 | `--override-reason` | No | Force-launch during an open 429 quota window (reason logged; visible in `sam doctor`). Reason required |
+| `--no-space` | No | Bypass the 15s launch spacing interval (logged as bypassed in `sam doctor`) |
 
 **Output:** Agent ID like `sam-20260716-103042-a1b2c3`.
 
 **Deferrals (not errors):** spawn may exit `6` `deferred` while the global
-≥15 s launch-spacing slot or a model's 429 quota window is open. The message
+≥15 s launch-spacing slot, the max 4 running concurrency cap, or a model's 429 quota window is open. The message
 says `NOT an error`: sleep `retry_after_s` and re-run the same spawn, or pass
-`--override-reason`. Exit `5` `already_queued` means that name already has a
+`--override-reason` (for quota) or `--no-space` (for spacing). Exit `5` `already_queued` means that name already has a
 pending infra-retry (wait, `sam retry <name> --cancel`, or pick another name).
 
 **Agy example:**
@@ -134,6 +135,12 @@ SAM-owned relaunch — fire with `sam retry`, cancel with `sam retry --cancel`
 `AGE` = elapsed since the current run started (`run_started_at`, original
 `created_at` kept for history). Wrapper `started_at` takes precedence; missing
 start time for an older resumed run shows `-` rather than its original age.
+
+Liveness vocabulary: The primary verdict strictly remains one of `active`, `idle`,
+`alive` (rendered as `alive (no task signal Xm)` in text), `working`, or `<state>`
+(never bare "stalled"). The tier-2 resource delta probe reports a separate side-field
+`movement: "moving" | "still" | null` on the liveness object and in `--detail` output,
+without mutating the primary verdict string.
 
 Live dashboard: `sam-tui` (continuous auto-refresh every 2s, `q` to quit;
 `--once` for a single snapshot, `--all` for history, `--archived` for archive-only). `sam status
@@ -180,7 +187,7 @@ sam wait <id-or-name> [--timeout <seconds>] [--kill-after <seconds>] [--json]
 Distinct from harness execution limits: agy is explicitly unlimited (`--print-timeout 0s`).
 
 **Exit codes:**
-- 0 = completed, killed, unknown, partial, or awaiting_retry (read JSON `status` field to tell them apart); also a deprecated `--timeout N` detach (JSON `detached:true`, state `running`)
+- 0 = completed, killed, unknown, partial, or awaiting_retry (read JSON `status` field to tell them apart); also a deprecated `--timeout N` detach (JSON `detached:true`, state `running`). Agents in `awaiting_retry` omit `exit_code` as their lifecycle has not finished — SAM owns their relaunch.
 - 1 = failed (read JSON `status`/`exit_code`) or lock/error
 - 4 = `--kill-after N` exceeded — termination attempted, state persisted as `killed`
 - 5 = not found
@@ -221,16 +228,19 @@ Sentinels are stripped by default for clean output.
 Continue a terminal agent with a new task as a new background run.
 
 ```bash
-sam resume <id-or-name> --task <path> [--model <model>] [--thinking <level> | --effort <level>]
+sam resume <id-or-name> --task <path> [--model <model>] [--thinking <level> | --effort <level>] [--override-reason <why>] [--no-space]
 ```
 
 Same name, preserved session, new process, new `run-NNN/` (task snapshot
 per run; old runs untouched). Only works on terminal agents. Requires
-`--task`. Cannot change harness; agy requires a valid conversation pointer
-(use `spawn`, not `resume`, when it is missing). `--thinking`/`--effort`
-overrides are stored on the new run. Exit codes: 0 ok; 1 validation/launch
-error; 2 bad harness/flag mix; 3 not found; 5 missing id, or `already_queued`
-when the run awaits an infra-retry (wait or use `sam retry`); 6 not terminal;
+`--task`. Enforces launch gate: ≥15s spacing, max 4 running concurrency cap,
+and 429 quota window check. Accepts `--no-space` to bypass spacing and
+`--override-reason` to bypass 429 quota windows. Cannot change harness; agy
+requires a valid conversation pointer (use `spawn`, not `resume`, when it is missing).
+`--thinking`/`--effort` overrides are stored on the new run. Exit codes: 0 ok;
+1 validation/launch error; 2 bad harness/flag mix; 3 not found; 5 missing id, or
+`already_queued` when the run awaits an infra-retry (wait or use `sam retry`);
+6 not terminal or launch `deferred` (spacing slot, capacity cap 4, or quota window open);
 7 max restarts; 8 lock timeout.
 Resume model precedence: `--model` → stored model → `SAM_MODEL` →
     per-harness config/builtin. Reasoning flags apply to this run only; absent
@@ -241,16 +251,17 @@ flags defer to the harness, rather than inheriting an old explicit override.
 Restart a terminal agent with a fresh run directory.
 
 ```bash
-sam restart <id-or-name> [--harness <pi|agy>] [--thinking <level> | --effort <level>]
+sam restart <id-or-name> [--harness <pi|agy>] [--thinking <level> | --effort <level>] [--override-reason <why>] [--no-space]
 ```
 
 Same name, same task, new process. Only works on terminal agents.
-Agy restarts preserve the `conversation_id` pointer so the conversation
-continues; pi restarts use a fresh `run-NNN/session.jsonl`.
-`--thinking`/`--effort` overrides are stored on the new run; switching
-harness clears the other harness's stale setting. Exit codes: 0 ok;
-1 validation/launch error; 2 bad harness/flag mix; 3 not found;
-6 not terminal; 7 max restarts; 8 lock timeout. Restart retains the stored model.
+Enforces launch gate: ≥15s spacing, max 4 running concurrency cap, and 429 quota
+window check. Accepts `--no-space` and `--override-reason`. Agy restarts
+preserve the `conversation_id` pointer so the conversation continues; pi restarts
+use a fresh `run-NNN/session.jsonl`. `--thinking`/`--effort` overrides are
+stored on the new run; switching harness clears the other harness's stale setting.
+Exit codes: 0 ok; 1 validation/launch error; 2 bad harness/flag mix; 3 not found;
+6 not terminal or launch `deferred`; 7 max restarts; 8 lock timeout. Restart retains the stored model.
 
 ### `sam retry`
 
@@ -270,19 +281,23 @@ and startup-network deaths (<2 min). `not_before` = parsed `Resets in`
 `--override-reason` escapes it. Firing goes through the resume path (same
 agent, new run, operator restart budget bypassed; agy resumes the
 conversation when a pointer exists, else a fresh conversation on the same
-task). The spawn breaker never gates a queued retry; `sam kill` or
+task) and enforces launch gate constraints (spacing and concurrency cap).
+The spawn breaker never gates a queued retry; `sam kill` or
 `--cancel` drop it. Exit codes: 0 fired/listed; 1 not queued/launch error;
-3 not found; 5 not due (already_queued); 8 lock timeout.
+3 not found; 5 not due (already_queued); 6 launch `deferred` (spacing slot or cap 4); 8 lock timeout.
 
 ### `sam doctor`
 
-Offline audit of launch spacing, concurrency, overrides, and the retry
-queue (read-only; exits 0 unless the registry is unreadable).
+Offline audit of `$SAM_HOME/launches.jsonl` audit log, launch spacing,
+concurrency, overrides, and the retry queue.
 
 ```bash
 sam doctor [--window [HOURS]] [--json]    # default window: 24 h
 ```
 
+Audits `$SAM_HOME/launches.jsonl` (appended on every spawn, resume, restart, and retry launch).
+If the audit log is missing or unreadable, doctor operates `FAIL-OPEN`: exits 0 and reports
+no launch history rather than erroring or blocking.
 Per-spawn rows show `gap` since the previous spawn, concurrency at that
 instant, `bypassed` (`--no-space`), and `--override-reason` usage.
 `VERDICT: SPACING OK` = every gap ≥ 15 s (bypassed launches exempt) and
@@ -323,7 +338,8 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
    `--timeout 0` = wait forever). Use only when explicitly requested or
    required to consume output before returning. JSON contains `status` and
    nested `result` (possibly null); completed/failed include `exit_code`,
-   killed/unknown/partial/awaiting_retry omit it. Inspect `status` even on
+   while killed/unknown/partial and `awaiting_retry` omit it (`awaiting_retry`
+   indicates an infra failure waiting for SAM relaunch, not a completed run). Inspect `status` even on
    exit 0.
    NEVER pass a nonzero `--timeout`: it is deprecated and detaches
    immediately (exit 0, warning) — useless as a wait and useless as a
@@ -355,7 +371,7 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
 4. **Task files must be self-contained.** The sub-agent has no access to the parent/invoking process's conversation history. Include all necessary context.
 5. **Never edit `~/.sam/registry.json` directly.** Always use SAM commands.
 6. **Spawn-and-forget by default.** Never auto-wait, sleep, or poll after spawn. `wait` requires explicit synchronous intent as above.
-7. **Read tiers: `status` → `status --detail` → `result` → `logs -n 50`.** `status` gives state; `--detail` adds the `Liveness:` verdict (`active`/`idle`/`working` with signal age, plus `alive (no task signal Xm)` for proc-verified but file-silent workers — tiered pgid+start-time check, resource probe, heartbeat bonus; never a bare "stalled") — the working-vs-blocked answer, no checker agent needed; `result` is final-only; `logs` (default 50 lines) is the last resort for the full stream.
+7. **Read tiers: `status` → `status --detail` → `result` → `logs -n 50`.** `status` gives state; `--detail` adds the `Liveness:` verdict (`active`/`idle`/`working` with signal age, plus `alive (no task signal Xm)` for proc-verified but file-silent workers — tiered pgid+start-time check, resource probe, heartbeat bonus; never a bare "stalled"). The tier-2 resource delta probe reports a separate `movement: "moving" | "still" | null` side-field, keeping the primary verdict vocabulary clean. `result` is final-only; `logs` (default 50 lines) is the last resort for the full stream.
 8. **Pass `--model` only when overriding the default.** Children inherit `SAM_MODEL` automatically. Any model the underlying `pi`/`agy` CLI accepts can be used — the config default is a default, not an allowlist.
 9. **Spawning recovery:** a worker that has not persisted its PID within 30s of launch resolves as `failed` (not stuck `spawning`); recover with `sam restart` or `sam kill`.
 
@@ -371,7 +387,7 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
 | 3 | Not found | kill, logs, restart, resume, result, retry |
 | 4 | `--kill-after N` exceeded (terminated; state persisted `killed`). Deprecated nonzero `--timeout` instead detaches with exit 0 | wait |
 | 5 | Not found / identifier required; `already_queued` (resume on queued run; retry not due); spawn refused (name has queued retry) | wait, resume, retry, spawn |
-| 6 | Not terminal; `deferred` (spacing slot or 429 window open — not an error) | restart, resume, spawn |
+| 6 | Not terminal; launch `deferred` (spacing slot, capacity cap 4, or 429 window open — not an error) | restart, resume, spawn, retry |
 | 7 | Max restarts reached | restart, resume |
 | 8 | Lock timeout | spawn, resume, restart, retry |
 | 130 | KeyboardInterrupt (Ctrl+C) | All |
@@ -392,5 +408,5 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
   `opencode/muse-spark-1.3-contributor-free` may fail in pi; override with
   `--model` or `SAM_MODEL` using a provider/model your pi supports. Native
   OpenCode is next-stage work, not a supported SAM harness yet.
-- **Environment passthrough & isolation.** Sub-agents inherit the invoker's environment variables (including API keys), except interactive SSH session markers (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`), which are stripped to ensure headless harnesses like `agy` do not request re-login. `SSH_AUTH_SOCK` is preserved for git operations.
+- **Environment passthrough & isolation.** Sub-agents inherit the invoker's environment variables (including API keys), except interactive SSH session markers (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`) and invalid `DBUS_SESSION_BUS_ADDRESS`, which are stripped/cleaned to ensure headless harnesses like `agy` do not request re-login or hang on desktop keyring prompts. `SSH_AUTH_SOCK` is preserved for git operations.
 - **Registry is a single JSON file.** No concurrent modification protection beyond file locking. Do not edit it manually.

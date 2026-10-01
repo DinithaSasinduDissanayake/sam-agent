@@ -32,16 +32,16 @@ sam resume auth-review-n1 --task followup.md --json
 | Command | Purpose |
 |---------|---------|
 | `init` | Initialize SAM home directory |
-| `spawn` | Spawn a sub-agent (accepts `--model`, `--thinking <level>` pi-only, `--effort <level>` agy-only, `--override-reason` to force through an open 429 window) |
-| `status` | Show agent state (`--detail`, `--watch` two-sample then exits) |
+| `spawn` | Spawn a sub-agent (accepts `--model`, `--thinking <level>` pi-only, `--effort <level>` agy-only, `--override-reason`, `--no-space`) |
+| `status` | Show agent state & liveness (`active`/`idle`/`alive`/`working`/`<state>` with `movement` side-field: `moving`/`still`/`null`; `--detail`, `--watch`) |
 | `kill` | Kill a running agent (cancels a queued `awaiting_retry` instead of signaling) |
-| `wait` | Wait for agent completion (`--timeout 0` default = wait forever; nonzero `--timeout` deprecated → detaches exit 0; `--kill-after N` = explicit terminate exit 4) |
+| `wait` | Wait for agent completion (runs in `awaiting_retry` omit `exit_code` as lifecycle continues; `--timeout 0` default = wait forever; `--kill-after N` = terminate exit 4) |
 | `logs` | Show agent logs |
-| `restart` | Restart a terminal agent (same task; accepts `--thinking`/`--effort`) |
-| `resume` | Continue a terminal agent with a new task (accepts `--model`, `--thinking`/`--effort`) |
+| `restart` | Restart a terminal agent (same task; accepts `--thinking`/`--effort`, `--override-reason`, `--no-space`) |
+| `resume` | Continue a terminal agent with a new task (accepts `--model`, `--thinking`/`--effort`, `--override-reason`, `--no-space`) |
 | `result` | Print final result (structured fallback for old runs; `unavailable`, never a prior answer) |
-| `retry` | Fire / cancel / list SAM-owned infra-retries (429 + startup-network queue) |
-| `doctor` | Audit spawn spacing, concurrency at spawn, `--override-reason` usage, and the retry queue (`--window`, `--json`) |
+| `retry` | Fire / cancel / list SAM-owned infra-retries (429 + startup-network queue; exit 6 on deferral) |
+| `doctor` | Audit `$SAM_HOME/launches.jsonl` audit log, spawn spacing, concurrency cap 4, `--override-reason`, and retry queue (`FAIL-OPEN`: exits 0 if audit log missing) |
 | `prune` / `unprune` | Archive / restore terminal agents (never deletes) |
 | `skill` | Print SKILL.md |
 
@@ -74,8 +74,7 @@ is needed to inspect or manage SAM workers.
 
 - Agents are tracked in a JSON registry with flock-based locking
 - Each agent gets its own directory with run-NNN/ history
-- A wrapper script captures output, writes sentinel markers, and produces a structured result.json
-- Exit codes 0–8 plus 130 for scriptable handling (0=ok, 1=error/failed-rendezvous, 2=name/flag misuse, 3=not found, 4=wait `--kill-after` exceeded, 5=wait/resume not found or `already_queued`, 6=not terminal or spawn `deferred`, 7=max restarts, 8=lock timeout; see SKILL.md for the per-command table)
+- Exit codes 0–8 plus 130 for scriptable handling (0=ok, 1=error/failed-rendezvous, 2=name/flag misuse, 3=not found, 4=wait `--kill-after` exceeded, 5=wait/resume not found or `already_queued`, 6=not terminal or launch `deferred` [spawn, resume, restart, retry], 7=max restarts, 8=lock timeout; see SKILL.md for the per-command table)
 
 ## Limitations (v0.1)
 
@@ -83,6 +82,7 @@ is needed to inspect or manage SAM workers.
 - No daemon mode. Agents run as background processes. Orphans possible if parent crashes.
 - No automatic recovery. A worker that misses its 30s launch window resolves `failed`; manual `sam status` and `sam restart` required.
 - No SAM execution timeout: agy explicitly uses `--print-timeout 0s`. `sam wait --timeout 0` (the default) waits indefinitely; a nonzero `--timeout` is deprecated and detaches without touching the worker; termination-on-expiry requires the explicit `--kill-after N`.
+- Environment hygiene: Strips SSH session variables (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`) and unsets invalid `DBUS_SESSION_BUS_ADDRESS` to prevent interactive keyring or headless hangs.
 - Old-run final fallback is read-only: agy structured response; pi active-branch final within authoritative start/end timestamps. Unattributable output is unavailable, never replaced by a prior answer.
 - Disk space grows with per-run task/log/result history. Prune only archives; it does not delete history.
 
