@@ -99,6 +99,20 @@ def _concurrency_at(agents, t, now_dt):
     return n
 
 
+def _harness_status():
+    """Per harness: wrapper installed in $SAM_HOME/bin? binary on PATH? Read-only."""
+    import shutil
+    from sam import config as sam_config
+    out = {}
+    for name in sam_config.HARNESS_WRAPPERS:
+        try:
+            installed = sam_config.wrapper_path(harness=name).is_file()
+        except Exception:
+            installed = False
+        out[name] = {"wrapper_installed": installed, "binary": shutil.which(name)}
+    return out
+
+
 def collect(window_hours=24.0, now=None):
     now_dt = datetime.now(timezone.utc) if now is None else now
     cutoff = now_dt - timedelta(hours=float(window_hours))
@@ -145,6 +159,7 @@ def collect(window_hours=24.0, now=None):
             "name": a.get("name"),
             "id": a.get("id"),
             "model": a.get("model"),
+            "harness": a.get("harness"),
             "kind": a.get("kind", "spawn"),
             "gap_s": None if gap is None else round(gap, 3),
             "concurrency_at_spawn": conc,
@@ -215,6 +230,7 @@ def collect(window_hours=24.0, now=None):
         "spacing_ok": ok and len(rows) > 0,
         "no_spawns": len(rows) == 0,
         "spawn_log": rows,
+        "harnesses": _harness_status(),
         "thresholds": {
             "spawn_spacing_s": sam_proc.SPAWN_SPACING_S,
             "max_running": sam_proc.MAX_RUNNING,
@@ -242,6 +258,10 @@ def run(args):
         thr = report["thresholds"]
         print(f"thresholds: spacing>={thr['spawn_spacing_s']}s  "
               f"concurrency<={thr['max_running']}")
+        hs = report.get("harnesses") or {}
+        print("harnesses: " + "  ".join(
+            f"{h}(wrapper {'ok' if v['wrapper_installed'] else 'MISSING'}, "
+            f"bin {v['binary'] or 'MISSING'})" for h, v in hs.items()))
         for r in report["spawn_log"]:
             flags = []
             if r["gap_s"] is not None and r["gap_s"] < thr["spawn_spacing_s"]:
@@ -255,8 +275,9 @@ def run(args):
                 flags.append(f"override: {r['quota_override_reason']}")
             mark = " ".join(flags)
             kind_str = f" [{r['kind']}]" if r.get("kind") and r["kind"] != "spawn" else ""
+            harness_str = f" <{r['harness']}>" if r.get("harness") else ""
             print(f"  {r['at']}  gap={_fmt_gap(r['gap_s'])}  "
-                  f"conc={r['concurrency_at_spawn']}  {r['name']}{kind_str}  {mark}")
+                  f"conc={r['concurrency_at_spawn']}  {r['name']}{kind_str}{harness_str}  {mark}")
         if report["quota_overrides"]:
             print(f"quota overrides: {len(report['quota_overrides'])}")
         if report["retry_queue"]:
