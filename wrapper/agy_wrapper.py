@@ -333,6 +333,14 @@ def main():
             if args.effort:
                 agy_argv.extend(["--effort", args.effort])
 
+            child_env = os.environ.copy()
+            for var in ("SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"):
+                child_env.pop(var, None)
+            if "DBUS_SESSION_BUS_ADDRESS" not in child_env:
+                uid_bus = f"/run/user/{os.getuid()}/bus"
+                if os.path.exists(uid_bus):
+                    child_env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={uid_bus}"
+
             try:
                 child = subprocess.Popen(
                     agy_argv,
@@ -340,6 +348,7 @@ def main():
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
                     bufsize=0,
+                    env=child_env,
                 )
             except Exception as e:
                 _write_failed_result(args.result, args.agent_id, started_at,

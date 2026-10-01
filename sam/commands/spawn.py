@@ -91,16 +91,7 @@ def check_depth(config):
     return depth
 
 
-def build_child_env(agent_id, model, depth):
-    env = os.environ.copy()
-    env["SAM_AGENT_ID"] = agent_id
-    env["SAM_MODEL"] = model
-    env["SAM_DEPTH"] = str(depth + 1)
-    spawner_id = os.environ.get("SAM_AGENT_ID")
-    env["SAM_PARENT_ID"] = spawner_id or ""
-    root = os.environ.get("SAM_ROOT_ID") or agent_id
-    env["SAM_ROOT_ID"] = root
-    return env
+build_child_env = sam_util.build_child_env
 
 
 def allocate_paths(paths, agent_id, run_id):

@@ -181,14 +181,8 @@ def run(args):
             )
 
             # Build env (same as spawn)
-            env = os.environ.copy()
-            env["SAM_AGENT_ID"] = agent_id
-            env["SAM_MODEL"] = agent.get("model", "")
             parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
-            env["SAM_DEPTH"] = str(parent_depth + 1)
-            spawner_id = os.environ.get("SAM_AGENT_ID")
-            env["SAM_PARENT_ID"] = spawner_id or ""
-            env["SAM_ROOT_ID"] = os.environ.get("SAM_ROOT_ID") or agent_id
+            env = sam_util.build_child_env(agent_id, agent.get("model", ""), parent_depth)
 
             cwd = agent.get("cwd", os.getcwd())
 

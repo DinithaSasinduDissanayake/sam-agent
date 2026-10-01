@@ -392,5 +392,5 @@ When an invoker (any agent/human/CLI) spawns a child sub-agent:
   `opencode/muse-spark-1.3-contributor-free` may fail in pi; override with
   `--model` or `SAM_MODEL` using a provider/model your pi supports. Native
   OpenCode is next-stage work, not a supported SAM harness yet.
-- **Full environment passthrough.** Sub-agents inherit the invoker's environment variables, including API keys. This is a known v0.1 limitation.
+- **Environment passthrough & isolation.** Sub-agents inherit the invoker's environment variables (including API keys), except interactive SSH session markers (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`), which are stripped to ensure headless harnesses like `agy` do not request re-login. `SSH_AUTH_SOCK` is preserved for git operations.
 - **Registry is a single JSON file.** No concurrent modification protection beyond file locking. Do not edit it manually.
