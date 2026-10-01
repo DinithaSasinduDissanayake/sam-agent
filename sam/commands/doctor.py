@@ -88,11 +88,28 @@ def collect(window_hours=24.0, now=None):
     reg = sam_registry.load_registry()
     agents = reg.get("agents", [])
 
-    events = _spawn_events(agents, cutoff)
-    # Include the last spawn before the window so gap math crosses the edge.
-    prior = [(_parse_iso(a.get("created_at")), a) for a in agents]
-    prior = [e for e in prior if e[0] is not None and e[0] < cutoff]
-    prior.sort(key=lambda e: e[0])
+    launches = sam_proc.load_launches()
+    if launches:
+        agent_by_id = {a.get("id"): a for a in agents}
+        launch_events = []
+        for l in launches:
+            ts = l.get("ts")
+            if ts is None:
+                continue
+            when = datetime.fromtimestamp(ts, timezone.utc)
+            a = dict(agent_by_id.get(l.get("agent_id"), {}))
+            a.update(l)
+            a["spacing_bypassed"] = l.get("bypassed", a.get("spacing_bypassed", False))
+            launch_events.append((when, a))
+        launch_events.sort(key=lambda e: e[0])
+        events = [e for e in launch_events if e[0] >= cutoff]
+        prior = [e for e in launch_events if e[0] < cutoff]
+    else:
+        events = _spawn_events(agents, cutoff)
+        # Include the last spawn before the window so gap math crosses the edge.
+        prior = [(_parse_iso(a.get("created_at")), a) for a in agents]
+        prior = [e for e in prior if e[0] is not None and e[0] < cutoff]
+        prior.sort(key=lambda e: e[0])
 
     spacing_violations = []
     cap_violations = []
@@ -111,6 +128,7 @@ def collect(window_hours=24.0, now=None):
             "name": a.get("name"),
             "id": a.get("id"),
             "model": a.get("model"),
+            "kind": a.get("kind", "spawn"),
             "gap_s": None if gap is None else round(gap, 3),
             "concurrency_at_spawn": conc,
             "spacing_bypassed": bypass,
@@ -122,7 +140,7 @@ def collect(window_hours=24.0, now=None):
         if gap is not None:
             if min_gap is None or gap < min_gap:
                 min_gap = gap
-            if (gap < sam_proc.SPAWN_SPACING_S) and not bypass:
+            if (gap < sam_proc.SPAWN_SPACING_S - 0.05) and not bypass:
                 spacing_violations.append(row)
         if conc > sam_proc.MAX_RUNNING:
             cap_violations.append(row)
@@ -200,8 +218,9 @@ def run(args):
             if r.get("quota_override_reason"):
                 flags.append(f"override: {r['quota_override_reason']}")
             mark = " ".join(flags)
+            kind_str = f" [{r['kind']}]" if r.get("kind") and r["kind"] != "spawn" else ""
             print(f"  {r['at']}  gap={_fmt_gap(r['gap_s'])}  "
-                  f"conc={r['concurrency_at_spawn']}  {r['name']}  {mark}")
+                  f"conc={r['concurrency_at_spawn']}  {r['name']}{kind_str}  {mark}")
         if report["quota_overrides"]:
             print(f"quota overrides: {len(report['quota_overrides'])}")
         if report["retry_queue"]:

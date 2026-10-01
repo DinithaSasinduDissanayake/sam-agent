@@ -103,6 +103,10 @@ def main():
                            help="Thinking/reasoning level override for model (pi only)")
     p_restart.add_argument("--effort", default=None,
                            help="Effort level for agy harness (agy only)")
+    p_restart.add_argument("--override-reason", default=None,
+                           help="Override active 429 quota window with logged reason")
+    p_restart.add_argument("--no-space", action="store_true",
+                           help="Bypass launch spacing (experiment only)")
 
     # v0.1.1: skill — print SKILL.md for AI agents
     p_skill = sub.add_parser("skill", parents=[base_parser], help="Print SKILL.md for AI agents")
@@ -127,6 +131,10 @@ def main():
                           help="Harness wrapper to use (default stored harness, $SAM_HARNESS, config, or pi)")
     p_resume.add_argument("--effort", default=None,
                           help="Effort level for agy harness (agy only)")
+    p_resume.add_argument("--override-reason", default=None,
+                          help="Override active 429 quota window with logged reason")
+    p_resume.add_argument("--no-space", action="store_true",
+                          help="Bypass launch spacing (experiment only)")
 
     p_result = sub.add_parser("result", parents=[base_parser], help="Print agent final result")
     p_result.add_argument("id_or_name", nargs="?", default=None, help="Agent ID or name")

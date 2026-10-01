@@ -74,6 +74,22 @@ def run(args):
         if effort and harness != "agy":
             return _emit(2, "--effort requires --harness agy", as_json)
 
+        infra_retry = bool(getattr(args, "_infra_retry", False))
+        override_reason = (getattr(args, "override_reason", None) or "").strip() or None
+        no_space = bool(getattr(args, "no_space", False))
+
+        gate_res = sam_proc.launch_gate(
+            name=agent_name,
+            task=str(task_path),
+            model=model,
+            kind="retry" if infra_retry else "resume",
+            override_reason=override_reason,
+            no_space=no_space,
+            is_infra_retry=infra_retry,
+        )
+        if not gate_res["granted"]:
+            return sam_proc.emit_gate_rejection(gate_res, as_json)
+
         # Lock sequence: name lock + registry lock
         try:
             with sam_locks.name_lock(agent_name, timeout=10):
@@ -207,6 +223,15 @@ def run(args):
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+            )
+            sam_proc.record_launch(
+                agent_id=agent_id,
+                run_id=run_count,
+                kind="retry" if infra_retry else "resume",
+                bypassed=gate_res.get("bypassed", False),
+                fail_open=gate_res.get("fail_open", False),
+                model=model,
+                name=agent_name,
             )
         except Exception as e:
             with sam_locks.registry_lock(exclusive=True, timeout=10):

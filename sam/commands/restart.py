@@ -80,6 +80,23 @@ def run(args):
         if effort and harness != "agy":
             return _emit_error(2, "--effort requires --harness agy", as_json)
 
+        override_reason = (getattr(args, "override_reason", None) or "").strip() or None
+        no_space = bool(getattr(args, "no_space", False))
+        model = agent.get("model", "")
+        task_source = agent.get("task_path", "")
+
+        gate_res = sam_proc.launch_gate(
+            name=target_name,
+            task=str(task_source),
+            model=model,
+            kind="restart",
+            override_reason=override_reason,
+            no_space=no_space,
+            is_infra_retry=False,
+        )
+        if not gate_res["granted"]:
+            return sam_proc.emit_gate_rejection(gate_res, as_json)
+
         # Line 3: Acquire name lock + registry lock
         with sam_locks.name_lock(target_name, timeout=10):
             with sam_locks.registry_lock(exclusive=True, timeout=10):
@@ -195,6 +212,15 @@ def run(args):
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                     close_fds=True,
+                )
+                sam_proc.record_launch(
+                    agent_id=agent_id,
+                    run_id=run_count,
+                    kind="restart",
+                    bypassed=gate_res.get("bypassed", False),
+                    fail_open=gate_res.get("fail_open", False),
+                    model=model,
+                    name=target_name,
                 )
             except Exception as e:
                 # Line 18: Popen failed — mark failed

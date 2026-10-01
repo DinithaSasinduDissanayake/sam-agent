@@ -581,3 +581,181 @@ def acquire_spawn_slot(name, task, model, no_space=False,
             "retry_after_s": retry_after, "reason": reason,
             "duplicate_suppressed": False, "bypassed": False,
             "fail_open": False}
+
+
+LAUNCHES_FILE = "launches.jsonl"
+
+
+def launches_path(sam_home=None):
+    from sam import config as sam_config
+    return (sam_home or sam_config.get_sam_home()) / LAUNCHES_FILE
+
+
+def record_launch(agent_id, run_id, kind, bypassed=False, fail_open=False, model=None, name=None, ts=None):
+    """Record a launch event in append-only launches.jsonl."""
+    ts = time.time() if ts is None else float(ts)
+    entry = {
+        "ts": ts,
+        "agent_id": agent_id,
+        "name": name,
+        "run_id": run_id,
+        "kind": kind,
+        "model": model,
+        "bypassed": bool(bypassed),
+        "fail_open": bool(fail_open),
+    }
+    path = launches_path()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+            f.flush()
+    except Exception:
+        pass
+
+
+def load_launches(sam_home=None):
+    """Load all launch records from launches.jsonl."""
+    path = launches_path(sam_home)
+    if not path.is_file():
+        return []
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return records
+
+
+def launch_gate(
+    name,
+    task,
+    model,
+    kind="spawn",
+    override_reason=None,
+    no_space=False,
+    is_infra_retry=False,
+    wait_s=None,
+    running=0,
+    count_running=None,
+):
+    """Unified launch admission gate for spawn, resume, restart, and retry.
+
+    1. Quota Circuit Breaker:
+       If not an infra retry, checks sam_retry.active_window(model).
+       If an active 429 window exists and no override_reason is provided,
+       defers with exit code 6 (quota_window).
+    2. Spacing & Concurrency Limiter:
+       Enforces global >=15s spacing and max 4 running agents via
+       acquire_spawn_slot. Bounded wait up to wait_s.
+    """
+    from sam import retry as sam_retry
+
+    # 1. Quota breaker
+    if not is_infra_retry:
+        sam_retry.reconcile_pending()
+        quota_window = None if override_reason else sam_retry.active_window(model)
+        if quota_window is not None:
+            retry_after = max(1, int(quota_window - time.time() + 0.5))
+            try:
+                from datetime import datetime, timezone
+                eta_str = datetime.fromtimestamp(quota_window, timezone.utc).strftime("%H:%M:%SZ")
+            except Exception:
+                eta_str = str(quota_window)
+            guidance = (
+                f"429 quota window active for model {model} "
+                f"(advisory until ~{eta_str}). "
+                f"This is NOT an error — do not abort the task. "
+                f"Fresh {kind}s defer ~{retry_after}s "
+                f"(e.g. `sleep {retry_after}` then re-run this exact {kind} "
+                f"command unchanged), or pass --override-reason 'why now' to force "
+                f"(logged), or pick a different --model. Queued infra-retries "
+                f"for this model are unaffected."
+            )
+            return {
+                "granted": False,
+                "code": 6,
+                "reason": "quota_window",
+                "message": guidance,
+                "retry_after_s": retry_after,
+                "model": model,
+                "window_until": quota_window,
+                "duplicate_suppressed": False,
+                "bypassed": False,
+                "fail_open": False,
+            }
+
+    # 2. Spacing & capacity slot acquisition
+    if wait_s is None:
+        try:
+            wait_s = float(os.environ.get("SAM_SLOT_WAIT_S", SLOT_WAIT_S))
+        except (TypeError, ValueError):
+            wait_s = SLOT_WAIT_S
+
+    slot = acquire_spawn_slot(
+        name, str(task), model, no_space=no_space, wait_s=wait_s,
+        running=running, count_running=count_running
+    )
+    if not slot["granted"]:
+        retry_after = max(1, int(slot["retry_after_s"] + 0.5))
+        guidance = (
+            f"Launch slot unavailable ({slot['reason']}). "
+            f"This is NOT an error — do not abort the task. "
+            f"Wait ~{retry_after}s (e.g. `sleep {retry_after}`) and re-run "
+            f"this exact {kind} command unchanged."
+        )
+        if slot.get("duplicate_suppressed"):
+            guidance += " (duplicate request suppressed; slot still held)"
+        return {
+            "granted": False,
+            "code": 6,
+            "reason": slot["reason"],
+            "message": guidance,
+            "retry_after_s": retry_after,
+            "duplicate_suppressed": slot.get("duplicate_suppressed", False),
+            "bypassed": False,
+            "fail_open": False,
+        }
+
+    return {
+        "granted": True,
+        "code": 0,
+        "reason": slot.get("reason", "granted"),
+        "message": "ok",
+        "retry_after_s": 0.0,
+        "waited_s": round(slot.get("waited_s", 0.0), 1),
+        "bypassed": bool(slot.get("bypassed", False)),
+        "fail_open": bool(slot.get("fail_open", False)),
+        "duplicate_suppressed": False,
+    }
+
+
+def emit_gate_rejection(gate_res, as_json):
+    """Emit formatted rejection on stderr and return exit code."""
+    import sys
+    if as_json:
+        payload = {
+            "status": "deferred",
+            "code": gate_res.get("code", 6),
+            "message": gate_res.get("message", "deferred"),
+            "retry_after_s": gate_res.get("retry_after_s", 15),
+            "reason": gate_res.get("reason", "slot_unavailable"),
+        }
+        if gate_res.get("window_until") is not None:
+            payload["window_until"] = gate_res["window_until"]
+        if "model" in gate_res:
+            payload["model"] = gate_res["model"]
+        if gate_res.get("duplicate_suppressed"):
+            payload["duplicate_suppressed"] = True
+        print(json.dumps(payload), file=sys.stderr)
+    else:
+        print(f"sam: {gate_res.get('message', 'deferred')}", file=sys.stderr)
+    return gate_res.get("code", 6)
+

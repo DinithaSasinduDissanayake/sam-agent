@@ -251,12 +251,17 @@ def run(args):
                         print("No due retries.")
                     return 0
                 fired = 0
+                last_rc = 0
                 for item in items:
-                    if _fire(item, as_json, override_reason) == 0:
+                    rc = _fire(item, as_json, override_reason)
+                    if rc == 0:
                         fired += 1
-                if not as_json:
+                    else:
+                        last_rc = rc
+                        break
+                if not as_json and fired:
                     print(f"Fired {fired}/{len(items)} due retries.")
-                return 0 if fired else 1
+                return 0 if fired else last_rc
             return _list_queue(as_json)
 
         if cancel:
