@@ -57,6 +57,7 @@ def _seed_agent(sam_home, agent_id, name, model, state="running"):
         "session_path": str(session_file),
         "task_path": str(task_file),
         "result_path": str(result_file),
+        "log_path": str(run_dir / "output.log"),
         "run_count": 1,
         "run_id": 1,
         "created_at": "2026-10-01T12:00:00Z",
@@ -146,3 +147,48 @@ def test_spawn_reconciles_and_trips_breaker(sam_env, capsys, tmp_path):
     agent = next(a for a in reg["agents"] if a["id"] == "agent-429-spawn")
     assert agent["state"] == "awaiting_retry"
     assert sam_retry.find_for("agent-429-spawn") is not None
+
+
+def test_wait_promotes_log_only_429_to_awaiting_retry(sam_env, capsys):
+    res_path = _seed_agent(sam_env, "agent-429-log-only", "test-429-log-only", "gemini-flash")
+    # result.json has exit_code 1, failed status, but empty error string
+    res_path.write_text(json.dumps({
+        "exit_code": 1,
+        "status": "failed",
+        "final_state_hint": "failed",
+        "duration_ms": 2500,
+        "error": ""
+    }))
+    # 429 marker only exists in the output.log file
+    log_path = res_path.parent / "output.log"
+    log_path.write_text(
+        "[2026-10-01T12:00:05Z] Calling model gemini-flash...\n"
+        "[2026-10-01T12:00:07Z] Error: 429 RESOURCE_EXHAUSTED Individual quota reached. Resets in 0m45s\n"
+    )
+
+    args = argparse.Namespace(
+        id_or_name="test-429-log-only",
+        name=None,
+        agent=None,
+        timeout=0,
+        kill_after=None,
+        json=True,
+    )
+    rc = wait_cmd.run(args)
+    assert rc == 0, "wait on log-only infra failure should exit 0 with awaiting_retry"
+
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["status"] == "awaiting_retry"
+    assert "exit_code" not in data
+
+    # Registry assertion
+    reg = sam_registry.load_registry()
+    agent = next(a for a in reg["agents"] if a["id"] == "agent-429-log-only")
+    assert agent["state"] == "awaiting_retry"
+
+    # Queue assertion
+    queue_item = sam_retry.find_for("agent-429-log-only")
+    assert queue_item is not None
+    assert queue_item["kind"] == "quota"
+
