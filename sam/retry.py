@@ -44,22 +44,39 @@ def queue_path():
 
 
 def load_queue():
+    p = queue_path()
+    if not p.is_file():
+        return []
     try:
-        with open(queue_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(p, "r", encoding="utf-8") as f:
+            content = f.read()
+        if not content.strip():
+            return []
+        data = json.loads(content)
         if isinstance(data, list):
             return data
-    except (FileNotFoundError, PermissionError, ValueError):
-        pass
-    return []
+        raise ValueError("retry queue content is not a list")
+    except (json.JSONDecodeError, ValueError) as e:
+        ts = int(time.time())
+        corrupt_path = p.parent / f"retry_queue.corrupt-{ts}"
+        try:
+            os.replace(p, corrupt_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"retry queue corrupt (renamed to {corrupt_path.name}): {e}") from e
+    except (FileNotFoundError, PermissionError):
+        return []
 
 
 def save_queue(items):
+    import tempfile
     path = queue_path()
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd, tmp = tempfile.mkstemp(
+            dir=path.parent, prefix="retry_queue.", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(items, f, indent=1)
             f.flush()
             try:
@@ -142,23 +159,31 @@ def compute_not_before(kind, error_text, now=None):
 
 
 def enqueue(agent_id, name, model, kind, not_before,
-            reset_advisory_s=None, reason=""):
+            reset_advisory_s=None, reason="", if_absent=False):
     """Add/replace the queue item for agent_id. Returns the item."""
-    items = [i for i in load_queue() if i.get("agent_id") != agent_id]
-    item = {
-        "agent_id": agent_id,
-        "name": name,
-        "model": model,
-        "kind": kind,
-        "enqueued_at": time.time(),
-        "not_before": not_before,
-        "reset_advisory_s": reset_advisory_s,
-        "reason": reason,
-        "attempts": 0,
-    }
-    items.append(item)
-    save_queue(items)
-    return item
+    from sam import locks as sam_locks
+    with sam_locks.retry_queue_lock(exclusive=True, timeout=10):
+        items = load_queue()
+        for i in items:
+            if i.get("agent_id") == agent_id:
+                if if_absent:
+                    return i
+                break
+        items = [i for i in items if i.get("agent_id") != agent_id]
+        item = {
+            "agent_id": agent_id,
+            "name": name,
+            "model": model,
+            "kind": kind,
+            "enqueued_at": time.time(),
+            "not_before": not_before,
+            "reset_advisory_s": reset_advisory_s,
+            "reason": reason,
+            "attempts": 0,
+        }
+        items.append(item)
+        save_queue(items)
+        return item
 
 
 def find_for(agent_id):
@@ -176,12 +201,14 @@ def find_for_name(name):
 
 
 def remove(agent_id):
-    items = load_queue()
-    kept = [i for i in items if i.get("agent_id") != agent_id]
-    if len(kept) != len(items):
-        save_queue(kept)
-        return True
-    return False
+    from sam import locks as sam_locks
+    with sam_locks.retry_queue_lock(exclusive=True, timeout=10):
+        items = load_queue()
+        kept = [i for i in items if i.get("agent_id") != agent_id]
+        if len(kept) != len(items):
+            save_queue(kept)
+            return True
+        return False
 
 
 def active_window(model, now=None):
@@ -250,7 +277,8 @@ def promote_if_infra(agent_entry, result_path=None, log_path=None):
         agent_entry.get("model"),
         kind, not_before,
         reset_advisory_s=reset_s,
-        reason=err_text[:200] or kind)
+        reason=err_text[:200] or kind,
+        if_absent=True)
     return True, item
 
 

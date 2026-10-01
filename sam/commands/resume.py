@@ -74,10 +74,12 @@ def run(args):
             agent, agent.get("run_id", 1))
         if resolved == "awaiting_retry" and not infra_retry:
             item = _queued_retry(agent_id)
-            fires = _fmt_fires(item)
-            return _emit(5, f"already_queued{fires} "
-                            f"(sam retry to fire now, or --cancel)",
-                         as_json)
+            if item is not None:
+                fires = _fmt_fires(item)
+                return _emit(5, f"already_queued{fires} "
+                                f"(sam retry to fire now, or --cancel)",
+                             as_json)
+            resolved = "failed"
         if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
             return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
@@ -111,10 +113,12 @@ def run(args):
                     infra_retry = bool(getattr(args, "_infra_retry", False))
                     if resolved == "awaiting_retry" and not infra_retry:
                         item = _queued_retry(agent_id)
-                        fires = _fmt_fires(item)
-                        return _emit(5, f"already_queued{fires} "
-                                        f"(sam retry to fire now, or --cancel)",
-                                     as_json)
+                        if item is not None:
+                            fires = _fmt_fires(item)
+                            return _emit(5, f"already_queued{fires} "
+                                            f"(sam retry to fire now, or --cancel)",
+                                         as_json)
+                        resolved = "failed"
                     if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
                         return _emit(6, f"agent not terminal (state={resolved})", as_json)
 

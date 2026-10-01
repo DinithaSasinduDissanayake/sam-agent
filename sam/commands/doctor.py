@@ -152,7 +152,18 @@ def collect(window_hours=24.0, now=None):
     ]
 
     queue = []
-    for i in sam_retry.load_queue():
+    corrupt_queues = []
+    q_dir = sam_retry.queue_path().parent
+    if q_dir.is_dir():
+        for cf in sorted(q_dir.glob("retry_queue.corrupt-*")):
+            corrupt_queues.append(cf.name)
+    try:
+        loaded_items = sam_retry.load_queue()
+    except Exception as e:
+        corrupt_queues.append(str(e))
+        loaded_items = []
+
+    for i in loaded_items:
         nb = i.get("not_before")
         queue.append({
             "name": i.get("name"),
@@ -176,6 +187,7 @@ def collect(window_hours=24.0, now=None):
         "cap_violations": cap_violations,
         "quota_overrides": overrides,
         "retry_queue": queue,
+        "corrupt_retry_queues": corrupt_queues,
         "spacing_ok": ok and len(rows) > 0,
         "no_spawns": len(rows) == 0,
         "spawn_log": rows,
@@ -228,6 +240,8 @@ def run(args):
             for q in report["retry_queue"]:
                 print(f"  [{'DUE' if q['due'] else 'wait'}] {q['name']} "
                       f"kind={q['kind']} fires~{q['fires_at']}")
+        if report.get("corrupt_retry_queues"):
+            print(f"corrupt retry queue: {', '.join(report['corrupt_retry_queues'])}")
         if report["no_spawns"]:
             print("no spawns in window")
         elif report["spacing_ok"]:

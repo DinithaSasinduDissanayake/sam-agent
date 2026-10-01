@@ -102,3 +102,19 @@ def registry_lock(exclusive=True, timeout=10):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+@contextlib.contextmanager
+def retry_queue_lock(exclusive=True, timeout=10):
+    """Context manager for the retry queue lock.
+    Stored at $SAM_HOME/locks/retry_queue.lock.
+    """
+    path = sam_config.locks_dir() / "retry_queue.lock"
+    lock_flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    fd = _acquire_lock(path, timeout, lock_flag)
+
+    try:
+        yield fd
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
