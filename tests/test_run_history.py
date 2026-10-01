@@ -326,7 +326,8 @@ sys.exit(int(os.environ.get("WORKER_EXIT", "0")))
 
 
 def cli(home, *argv):
-    return subprocess.run([sys.executable, "-m", "sam.cli", *argv, "--json"],
+    extra = ["--no-space"] if argv and argv[0] in ("spawn", "resume", "restart") else []
+    return subprocess.run([sys.executable, "-m", "sam.cli", *argv, *extra, "--json"],
                           cwd=ROOT, capture_output=True, text=True, timeout=10)
 
 

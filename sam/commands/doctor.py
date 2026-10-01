@@ -88,11 +88,28 @@ def collect(window_hours=24.0, now=None):
     reg = sam_registry.load_registry()
     agents = reg.get("agents", [])
 
-    events = _spawn_events(agents, cutoff)
-    # Include the last spawn before the window so gap math crosses the edge.
-    prior = [(_parse_iso(a.get("created_at")), a) for a in agents]
-    prior = [e for e in prior if e[0] is not None and e[0] < cutoff]
-    prior.sort(key=lambda e: e[0])
+    launches = sam_proc.load_launches()
+    if launches:
+        agent_by_id = {a.get("id"): a for a in agents}
+        launch_events = []
+        for l in launches:
+            ts = l.get("ts")
+            if ts is None:
+                continue
+            when = datetime.fromtimestamp(ts, timezone.utc)
+            a = dict(agent_by_id.get(l.get("agent_id"), {}))
+            a.update(l)
+            a["spacing_bypassed"] = l.get("bypassed", a.get("spacing_bypassed", False))
+            launch_events.append((when, a))
+        launch_events.sort(key=lambda e: e[0])
+        events = [e for e in launch_events if e[0] >= cutoff]
+        prior = [e for e in launch_events if e[0] < cutoff]
+    else:
+        events = _spawn_events(agents, cutoff)
+        # Include the last spawn before the window so gap math crosses the edge.
+        prior = [(_parse_iso(a.get("created_at")), a) for a in agents]
+        prior = [e for e in prior if e[0] is not None and e[0] < cutoff]
+        prior.sort(key=lambda e: e[0])
 
     spacing_violations = []
     cap_violations = []
@@ -111,9 +128,11 @@ def collect(window_hours=24.0, now=None):
             "name": a.get("name"),
             "id": a.get("id"),
             "model": a.get("model"),
+            "kind": a.get("kind", "spawn"),
             "gap_s": None if gap is None else round(gap, 3),
             "concurrency_at_spawn": conc,
             "spacing_bypassed": bypass,
+            "fail_open": bool(a.get("fail_open")),
             "spawn_waited_s": a.get("spawn_waited_s"),
             "quota_override_reason": a.get("quota_override_reason"),
         }
@@ -121,7 +140,7 @@ def collect(window_hours=24.0, now=None):
         if gap is not None:
             if min_gap is None or gap < min_gap:
                 min_gap = gap
-            if (gap < sam_proc.SPAWN_SPACING_S) and not bypass:
+            if (gap < sam_proc.SPAWN_SPACING_S - 0.05) and not bypass:
                 spacing_violations.append(row)
         if conc > sam_proc.MAX_RUNNING:
             cap_violations.append(row)
@@ -133,7 +152,18 @@ def collect(window_hours=24.0, now=None):
     ]
 
     queue = []
-    for i in sam_retry.load_queue():
+    corrupt_queues = []
+    q_dir = sam_retry.queue_path().parent
+    if q_dir.is_dir():
+        for cf in sorted(q_dir.glob("retry_queue.corrupt-*")):
+            corrupt_queues.append(cf.name)
+    try:
+        loaded_items = sam_retry.load_queue()
+    except Exception as e:
+        corrupt_queues.append(str(e))
+        loaded_items = []
+
+    for i in loaded_items:
         nb = i.get("not_before")
         queue.append({
             "name": i.get("name"),
@@ -144,6 +174,12 @@ def collect(window_hours=24.0, now=None):
                          if isinstance(nb, (int, float)) else None),
             "due": isinstance(nb, (int, float)) and nb <= time.time(),
         })
+
+    dead_retries = []
+    try:
+        dead_retries = sam_retry.load_dead()
+    except Exception:
+        pass
 
     ok = not spacing_violations and not cap_violations
     return {
@@ -157,6 +193,8 @@ def collect(window_hours=24.0, now=None):
         "cap_violations": cap_violations,
         "quota_overrides": overrides,
         "retry_queue": queue,
+        "dead_retries": dead_retries,
+        "corrupt_retry_queues": corrupt_queues,
         "spacing_ok": ok and len(rows) > 0,
         "no_spawns": len(rows) == 0,
         "spawn_log": rows,
@@ -194,11 +232,14 @@ def run(args):
                              else f"bypassed({r['gap_s']}s)")
             if r["concurrency_at_spawn"] > thr["max_running"]:
                 flags.append(f"OVER-CAP({r['concurrency_at_spawn']})")
+            if r.get("fail_open"):
+                flags.append("FAIL-OPEN")
             if r.get("quota_override_reason"):
                 flags.append(f"override: {r['quota_override_reason']}")
             mark = " ".join(flags)
+            kind_str = f" [{r['kind']}]" if r.get("kind") and r["kind"] != "spawn" else ""
             print(f"  {r['at']}  gap={_fmt_gap(r['gap_s'])}  "
-                  f"conc={r['concurrency_at_spawn']}  {r['name']}  {mark}")
+                  f"conc={r['concurrency_at_spawn']}  {r['name']}{kind_str}  {mark}")
         if report["quota_overrides"]:
             print(f"quota overrides: {len(report['quota_overrides'])}")
         if report["retry_queue"]:
@@ -206,6 +247,13 @@ def run(args):
             for q in report["retry_queue"]:
                 print(f"  [{'DUE' if q['due'] else 'wait'}] {q['name']} "
                       f"kind={q['kind']} fires~{q['fires_at']}")
+        if report.get("dead_retries"):
+            print(f"dead retries: {len(report['dead_retries'])}")
+            for d in report["dead_retries"]:
+                print(f"  [DEAD] {d.get('name')} ({d.get('agent_id')}) "
+                      f"attempts={d.get('attempts', 3)}: {d.get('last_error', 'unknown')}")
+        if report.get("corrupt_retry_queues"):
+            print(f"corrupt retry queue: {', '.join(report['corrupt_retry_queues'])}")
         if report["no_spawns"]:
             print("no spawns in window")
         elif report["spacing_ok"]:

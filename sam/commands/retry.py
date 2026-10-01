@@ -56,13 +56,7 @@ def _fmt_ts(ts):
 
 def _resolve_agent(ref):
     reg = sam_registry.load_registry()
-    for a in reg.get("agents", []):
-        if a.get("id") == ref:
-            return a
-    for a in reg.get("agents", []):
-        if a.get("name") == ref:
-            return a
-    return None
+    return sam_registry.resolve_ref(reg.get("agents", []), ref)
 
 
 def _clear_queue_fields(agent_id):
@@ -126,11 +120,15 @@ def _fire(item, as_json, override_reason=None):
     if rc != 0:
         # Surface resume's structured error; keep the queue item (a
         # not-before/pointer error is retryable after fixing).
+        err_msg = out
         try:
             err = json.loads(out.splitlines()[-1])
+            err_msg = err.get("message", out)
+            item["_last_err"] = err_msg
             return _emit_error(err.get("code", rc),
-                               err.get("message", out), as_json)
+                               err_msg, as_json)
         except (ValueError, IndexError, KeyError):
+            item["_last_err"] = out or "infra-retry launch failed"
             return _emit_error(rc, out or "infra-retry launch failed", as_json)
 
     sam_retry.remove(agent_id)
@@ -215,18 +213,33 @@ def _list_queue(as_json):
             "retry_in_s": int(nb - now) if isinstance(nb, (int, float)) else None,
             "enqueued_at": _fmt_ts(i.get("enqueued_at")),
             "reason": i.get("reason"),
+            "attempts": i.get("attempts", 0),
+            "last_error": i.get("last_error"),
         })
+    dead_items = sam_retry.load_dead()
     if as_json:
-        print(json.dumps({"status": "ok", "queue": rows, "count": len(rows)}))
+        print(json.dumps({
+            "status": "ok",
+            "queue": rows,
+            "count": len(rows),
+            "dead": dead_items,
+            "dead_count": len(dead_items),
+        }))
         return 0
-    if not rows:
+    if not rows and not dead_items:
         print("Retry queue empty.")
         return 0
     for r in rows:
         mark = "DUE " if r["due"] else "wait"
+        att = f" attempts={r['attempts']}" if r.get("attempts") else ""
         print(f"[{mark}] {r['name']} ({r['agent_id']}) kind={r['kind']} "
-              f"model={r['model']} fires~{r['fires_at']} "
+              f"model={r['model']}{att} fires~{r['fires_at']} "
               f"in {r['retry_in_s']}s")
+    if dead_items:
+        print(f"\nDead-letter retries ({len(dead_items)}):")
+        for d in dead_items:
+            print(f"  [DEAD] {d.get('name')} ({d.get('agent_id')}) "
+                  f"attempts={d.get('attempts', 3)}: {d.get('last_error', 'unknown')}")
     print("Fire: sam retry NAME   Cancel: sam retry NAME --cancel")
     return 0
 
@@ -251,12 +264,22 @@ def run(args):
                         print("No due retries.")
                     return 0
                 fired = 0
+                last_rc = 0
                 for item in items:
-                    if _fire(item, as_json, override_reason) == 0:
+                    rc = _fire(item, as_json, override_reason)
+                    if rc == 0:
                         fired += 1
-                if not as_json:
+                    elif rc == 6:
+                        last_rc = rc
+                        break
+                    else:
+                        last_rc = rc
+                        err_msg = item.get("_last_err", f"exit code {rc}")
+                        sam_retry.record_failure(item.get("agent_id"), err_msg)
+                        continue
+                if not as_json and fired:
                     print(f"Fired {fired}/{len(items)} due retries.")
-                return 0 if fired else 1
+                return 0 if fired else last_rc
             return _list_queue(as_json)
 
         if cancel:

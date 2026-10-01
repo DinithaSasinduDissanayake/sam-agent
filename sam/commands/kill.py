@@ -44,19 +44,7 @@ def run(args):
         if ref is None:
             return _emit_error(1, "agent identifier required", as_json)
 
-        agent = None
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        if agent is None:
-            matches = [a for a in agents if a.get("name") == ref]
-            non_term = [a for a in matches if a.get("state") not in sam_state.TERMINAL_STATES]
-            if non_term:
-                agent = non_term[0]
-            elif matches:
-                agent = matches[0]
-
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit_error(3, f"agent not found: {ref}", as_json)
 
@@ -71,9 +59,11 @@ def run(args):
                 agent = a
                 break
 
+            snap_run_id = agent.get("run_id") or agent.get("run_count") or 1
+            snap_pid = agent.get("pid")
+
             # Line 4-7: Resolve state, check killability
-            current_state = sam_state.resolve_agent_state(
-                agent, agent.get("run_id", 1))
+            current_state = sam_state.resolve_agent_state(agent, snap_run_id)
 
             # awaiting_retry = queued infra retry: kill cancels the queue item
             # (operator contract: enqueue/cancel/prioritize only — no signals).
@@ -159,23 +149,28 @@ def run(args):
             for a in registry["agents"]:
                 if a["id"] != agent_id:
                     continue
+                a_run = a.get("run_id") or a.get("run_count") or 1
+                if snap_run_id is not None and a_run != snap_run_id:
+                    # New run started concurrently; do not clobber
+                    break
+                if snap_pid is not None and a.get("pid") != snap_pid:
+                    # PID changed concurrently; do not clobber
+                    break
                 agent = a
+                final_state = sam_state.resolve_agent_state(agent, a_run)
+
+                if final_state not in sam_state.TERMINAL_STATES:
+                    # Process might be hung (D-state)
+                    print(f"Warning: agent {agent_id} may still be alive "
+                          f"(state={final_state})", file=sys.stderr)
+
+                if agent.get("state") not in sam_state.TERMINAL_STATES:
+                    agent["state"] = "killed"
+                    agent["killed_reason"] = "user_kill"
+                    agent["updated_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                    sam_registry.save_registry(registry)
                 break
-
-            final_state = sam_state.resolve_agent_state(
-                agent, agent.get("run_id", 1))
-
-            if final_state not in sam_state.TERMINAL_STATES:
-                # Process might be hung (D-state)
-                print(f"Warning: agent {agent_id} may still be alive "
-                      f"(state={final_state})", file=sys.stderr)
-
-            if agent.get("state") not in sam_state.TERMINAL_STATES:
-                agent["state"] = "killed"
-                agent["killed_reason"] = "user_kill"
-                agent["updated_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ")
-                sam_registry.save_registry(registry)
 
         if as_json:
             print(json.dumps({"status": "ok", "agent_id": agent_id,

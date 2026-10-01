@@ -32,13 +32,24 @@ def validate_name(name):
         raise ValueError(f"name must match {_NAME_RE.pattern}, got {name!r}")
 
 
-def build_child_env(agent_id, model, depth):
+STRIP_ENV_VARS = ("SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY")
+
+
+def build_child_env(agent_id, model, depth, harness=None):
     """Build child process environment for sub-agent.
 
     Sets SAM_AGENT_ID, SAM_MODEL, SAM_DEPTH, SAM_PARENT_ID, SAM_ROOT_ID.
-    Inherits full parent env (v0.1 accepted risk).
+    Strips interactive SSH markers (SSH_CLIENT, SSH_CONNECTION, SSH_TTY) so
+    headless harnesses do not prompt for re-auth. Preserves SSH_AUTH_SOCK.
+    Ensures DBUS_SESSION_BUS_ADDRESS points to user bus if available.
     """
     env = os.environ.copy()
+    for var in STRIP_ENV_VARS:
+        env.pop(var, None)
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        uid_bus = f"/run/user/{os.getuid()}/bus"
+        if os.path.exists(uid_bus):
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={uid_bus}"
     env["SAM_AGENT_ID"] = agent_id
     env["SAM_MODEL"] = model
     env["SAM_DEPTH"] = str(depth + 1)

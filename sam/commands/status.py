@@ -51,10 +51,18 @@ def _writeback_terminals(updates):
             promotions = []
             now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for a in registry.get("agents", []):
-                rid = updates.get(a.get("id"))
-                if rid is None:
+                val = updates.get(a.get("id"))
+                if val is None:
                     continue
-                if rid == "failed" and a.get("state") != "failed":
+                if not isinstance(val, tuple):
+                    continue
+                rid, snap_run_id, snap_pid = val
+                a_run = a.get("run_id") or a.get("run_count") or 1
+                if snap_run_id is not None and a_run != snap_run_id:
+                    continue
+                if snap_pid is not None and a.get("pid") != snap_pid:
+                    continue
+                if rid == "failed" and a.get("state") in ("running", "spawning", "unknown"):
                     promoted, item = sam_retry.promote_if_infra(a)
                     if promoted and item is not None:
                         rid = "awaiting_retry"
@@ -331,7 +339,10 @@ def _print_activity_detail(act, indent=""):
     ss = act.get("session") or {}
     lg = act.get("log") or {}
     watch = act.get("watch")
-    print(f"{indent}Liveness: {_fmt_liveness(act.get('liveness'))}")
+    liv = act.get('liveness') or {}
+    print(f"{indent}Liveness: {_fmt_liveness(liv)}")
+    if liv.get("movement"):
+        print(f"{indent}  movement: {liv.get('movement')}")
     print(f"{indent}Activity: {st}")
     print(f"{indent}  lifecycle: {act.get('lifecycle_state', '?')}")
     if ss.get("error"):
@@ -467,24 +478,7 @@ def run(args):
 
     if ref:
         # Single agent mode
-        agent = None
-        # Try exact ID first
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        # Try exact name
-        if agent is None:
-            matches = [a for a in agents if a.get("name") == ref]
-            # Among matches, prefer non-terminal
-            non_term = [a for a in matches if a.get("state") not in sam_state.TERMINAL_STATES]
-            if len(non_term) > 1:
-                return _emit_error(1, f"ambiguous name '{ref}'", as_json)
-            if non_term:
-                agent = non_term[0]
-            elif matches:
-                agent = matches[0]
-
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit_error(1, f"agent not found: {ref}", as_json)
 
@@ -499,7 +493,16 @@ def run(args):
             agent["resolved_state"] = "unknown"
             resolved = "unknown"
 
-        _writeback_terminals({agent["id"]: resolved} if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state") else {})
+        if resolved in sam_state.TERMINAL_STATES and resolved != agent.get("state"):
+            _writeback_terminals({
+                agent["id"]: (
+                    resolved,
+                    agent.get("run_id") or agent.get("run_count") or 1,
+                    agent.get("pid"),
+                )
+            })
+        else:
+            _writeback_terminals({})
         # Item 6: read-through backfill so registry-only readers (audits,
         # doctor, dashboards) see exit_code/duration_ms without opening
         # result.json themselves.
@@ -555,7 +558,11 @@ def run(args):
             entry["resolved_state"] = "failed"
             resolved = "failed"
         if resolved in sam_state.TERMINAL_STATES and resolved != a.get("state"):
-            updates[a.get("id")] = resolved
+            updates[a.get("id")] = (
+                resolved,
+                a.get("run_id") or a.get("run_count") or 1,
+                a.get("pid"),
+            )
         resolved_list.append(entry)
 
     _writeback_terminals(updates)

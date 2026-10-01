@@ -120,7 +120,7 @@ def test_429_run_promotes_to_awaiting_retry(home):
               '"error_code":429. Resets in 18m6s')
     _save(entry)
     before = time.time()
-    status_cmd._writeback_terminals({"a-429": "failed"})
+    status_cmd._writeback_terminals({"a-429": ("failed", 1, None)})
     got = _load("a-429")
     assert got["state"] == "awaiting_retry"
     nb = got["retry_not_before"]
@@ -143,7 +143,7 @@ def test_startup_network_death_enqueues(home):
         duration_ms=65000)
     _save(entry)
     before = time.time()
-    status_cmd._writeback_terminals({"a-net": "failed"})
+    status_cmd._writeback_terminals({"a-net": ("failed", 1, None)})
     got = _load("a-net")
     assert got["state"] == "awaiting_retry"
     item = sam_retry.find_for("a-net")
@@ -159,7 +159,7 @@ def test_midflight_network_stays_failed(home):
         error="EOF from stream after network connection",
         duration_ms=900000)
     _save(entry)
-    status_cmd._writeback_terminals({"a-mid": "failed"})
+    status_cmd._writeback_terminals({"a-mid": ("failed", 1, None)})
     assert _load("a-mid")["state"] == "failed"
     assert sam_retry.find_for("a-mid") is None
 
@@ -170,7 +170,7 @@ def test_quality_failure_not_promoted(home):
         home, "a-q", "quality", error="logic bug in deliverable",
         duration_ms=400000)
     _save(entry)
-    status_cmd._writeback_terminals({"a-q": "failed"})
+    status_cmd._writeback_terminals({"a-q": ("failed", 1, None)})
     assert _load("a-q")["state"] == "failed"
     assert sam_retry.find_for("a-q") is None
 

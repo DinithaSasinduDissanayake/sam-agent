@@ -38,16 +38,7 @@ def run(args):
             return _emit(5, "agent identifier required", as_json)
 
         # Resolve agent
-        agent = None
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        if agent is None:
-            for a in agents:
-                if a.get("name") == ref:
-                    agent = a
-                    break
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit(3, f"agent not found: {ref}", as_json)
 
@@ -74,6 +65,41 @@ def run(args):
         if effort and harness != "agy":
             return _emit(2, "--effort requires --harness agy", as_json)
 
+        infra_retry = bool(getattr(args, "_infra_retry", False))
+        override_reason = (getattr(args, "override_reason", None) or "").strip() or None
+        no_space = bool(getattr(args, "no_space", False))
+
+        # Pre-flight state check before launch gate / slot wait
+        resolved = sam_state.resolve_agent_state(
+            agent, agent.get("run_id", 1))
+        if resolved == "awaiting_retry" and not infra_retry:
+            item = _queued_retry(agent_id)
+            if item is not None:
+                fires = _fmt_fires(item)
+                return _emit(5, f"already_queued{fires} "
+                                f"(sam retry to fire now, or --cancel)",
+                             as_json)
+            resolved = "failed"
+        if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
+            return _emit(6, f"agent not terminal (state={resolved})", as_json)
+
+        # Pre-flight continuation check: don't burn launch slot if session is missing
+        session_path = agent.get("session_path")
+        if harness == "pi" and (not session_path or not os.path.isfile(session_path)):
+            return _emit(1, f"session file not found: {session_path}", as_json)
+
+        gate_res = sam_proc.launch_gate(
+            name=agent_name,
+            task=str(task_path),
+            model=model,
+            kind="retry" if infra_retry else "resume",
+            override_reason=override_reason,
+            no_space=no_space,
+            is_infra_retry=infra_retry,
+        )
+        if not gate_res["granted"]:
+            return sam_proc.emit_gate_rejection(gate_res, as_json)
+
         # Lock sequence: name lock + registry lock
         try:
             with sam_locks.name_lock(agent_name, timeout=10):
@@ -92,10 +118,12 @@ def run(args):
                     infra_retry = bool(getattr(args, "_infra_retry", False))
                     if resolved == "awaiting_retry" and not infra_retry:
                         item = _queued_retry(agent_id)
-                        fires = _fmt_fires(item)
-                        return _emit(5, f"already_queued{fires} "
-                                        f"(sam retry to fire now, or --cancel)",
-                                     as_json)
+                        if item is not None:
+                            fires = _fmt_fires(item)
+                            return _emit(5, f"already_queued{fires} "
+                                            f"(sam retry to fire now, or --cancel)",
+                                         as_json)
+                        resolved = "failed"
                     if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
                         return _emit(6, f"agent not terminal (state={resolved})", as_json)
 
@@ -207,6 +235,15 @@ def run(args):
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+            )
+            sam_proc.record_launch(
+                agent_id=agent_id,
+                run_id=run_count,
+                kind="retry" if infra_retry else "resume",
+                bypassed=gate_res.get("bypassed", False),
+                fail_open=gate_res.get("fail_open", False),
+                model=model,
+                name=agent_name,
             )
         except Exception as e:
             with sam_locks.registry_lock(exclusive=True, timeout=10):

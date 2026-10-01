@@ -171,16 +171,202 @@ def read_proc_resource(pid):
     try:
         with open(f"/proc/{pid}/io", "r") as f:
             for line in f:
-                if line.startswith("read_bytes:"):
+                if line.startswith("rchar:"):
                     io_read = int(line.split()[1])
-                elif line.startswith("write_bytes:"):
+                elif line.startswith("wchar:"):
                     io_write = int(line.split()[1])
-                if io_read is not None and io_write is not None:
-                    break
+                elif io_read is None and line.startswith("read_bytes:"):
+                    io_read = int(line.split()[1])
+                elif io_write is None and line.startswith("write_bytes:"):
+                    io_write = int(line.split()[1])
     except (OSError, ValueError, IndexError):
         pass
     return {"state": state, "cpu_ticks": cpu_ticks,
             "io_read_bytes": io_read, "io_write_bytes": io_write}
+
+
+PROBE_DIR = "probe"
+
+
+def probe_dir(sam_home=None):
+    from sam import config as sam_config
+    return (sam_home or sam_config.get_sam_home()) / PROBE_DIR
+
+
+def probe_path(agent_id, sam_home=None):
+    return probe_dir(sam_home) / f"{agent_id}.json"
+
+
+def load_probe_sample(agent_id, sam_home=None):
+    p = probe_path(agent_id, sam_home)
+    if not p.is_file():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_probe_sample(agent_id, sample, sam_home=None):
+    p = probe_path(agent_id, sam_home)
+    try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix="probe.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(sample, f)
+            f.flush()
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def sample_process_group(pid, pgid=None):
+    """Enumerate processes in the target's process group or session.
+
+    Matches pgrp == target_pgid or session == target_sid.
+    Returns dict: str(pid) -> {"starttime": int, "cpu": int, "io_read": int, "io_write": int}
+    """
+    if pid is None and pgid is None:
+        return None
+    target_pgid = pgid or (pgid_of(pid) if pid else None)
+    if target_pgid is not None and target_pgid <= 0:
+        target_pgid = None
+    target_sid = None
+    if pid is not None:
+        try:
+            with open(f"/proc/{pid}/stat", "r") as f:
+                data = f.read()
+            lp = data.rfind(")")
+            if lp != -1:
+                fields = data[lp + 1:].strip().split()
+                if len(fields) > 3:
+                    sid_val = int(fields[3])  # session id (field 3)
+                    if sid_val > 0:
+                        target_sid = sid_val
+        except Exception:
+            pass
+
+    if target_pgid is None and target_sid is None:
+        return None
+
+    samples = {}
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return None
+
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        p_int = int(entry)
+        stat_path = f"/proc/{entry}/stat"
+        try:
+            with open(stat_path, "r") as f:
+                data = f.read()
+            lp = data.rfind(")")
+            if lp == -1:
+                continue
+            fields = data[lp + 1:].strip().split()
+            if len(fields) < 20:
+                continue
+            pgrp = int(fields[2])
+            sid = int(fields[3])
+            matched = False
+            if target_pgid is not None and pgrp == target_pgid:
+                matched = True
+            elif target_sid is not None and sid == target_sid:
+                matched = True
+            if not matched:
+                continue
+            utime = int(fields[11])
+            stime = int(fields[12])
+            starttime = int(fields[19])
+        except (OSError, ValueError, IndexError):
+            continue
+
+        rchar = 0
+        wchar = 0
+        io_path = f"/proc/{entry}/io"
+        try:
+            with open(io_path, "r") as f:
+                for line in f:
+                    if line.startswith("rchar:"):
+                        rchar = int(line.split()[1])
+                    elif line.startswith("wchar:"):
+                        wchar = int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            pass
+
+        samples[str(p_int)] = {
+            "starttime": starttime,
+            "cpu": utime + stime,
+            "io_read": rchar,
+            "io_write": wchar,
+        }
+
+    return samples if samples else None
+
+
+def read_group_resource(pgid):
+    """Enumerate /proc/*/stat for pgrp == pgid, sum utime+stime,
+    and sum rchar/wchar from /proc/<pid>/io.
+    """
+    samples = sample_process_group(pgid, pgid)
+    if not samples:
+        return None
+    total_cpu = sum(s["cpu"] for s in samples.values())
+    total_rd = sum(s["io_read"] for s in samples.values())
+    total_wr = sum(s["io_write"] for s in samples.values())
+    return {
+        "cpu_ticks": total_cpu,
+        "io_read_bytes": total_rd,
+        "io_write_bytes": total_wr,
+    }
+
+
+def compute_sample_delta(sample_a, sample_b, interval_seconds):
+    """Compute per-pid resource deltas between sample_a and sample_b.
+
+    Per N6:
+    - Match processes present in both samples by (pid, starttime).
+    - New pids count as movement.
+    - Exited children do not subtract counters or hide sibling activity.
+    """
+    if sample_a is None or sample_b is None:
+        return None
+
+    total_cpu_delta = 0
+    total_rd_delta = 0
+    total_wr_delta = 0
+    moving = False
+
+    for pid, b_data in sample_b.items():
+        if pid not in sample_a or sample_a[pid].get("starttime") != b_data.get("starttime"):
+            # New process spawned in the group
+            moving = True
+            total_cpu_delta += b_data.get("cpu", 0)
+            total_rd_delta += b_data.get("io_read", 0)
+            total_wr_delta += b_data.get("io_write", 0)
+        else:
+            a_data = sample_a[pid]
+            c_delta = max(0, b_data.get("cpu", 0) - a_data.get("cpu", 0))
+            r_delta = max(0, b_data.get("io_read", 0) - a_data.get("io_read", 0))
+            w_delta = max(0, b_data.get("io_write", 0) - a_data.get("io_write", 0))
+            if c_delta > 0 or r_delta > 0 or w_delta > 0:
+                moving = True
+            total_cpu_delta += c_delta
+            total_rd_delta += r_delta
+            total_wr_delta += w_delta
+
+    return {
+        "interval_seconds": interval_seconds,
+        "cpu_ticks": total_cpu_delta,
+        "io_read_bytes": total_rd_delta,
+        "io_write_bytes": total_wr_delta,
+        "moving": moving,
+    }
 
 
 def proc_liveness(pid, stored_start_time=None, stored_pgid=None):
@@ -223,35 +409,71 @@ def proc_liveness(pid, stored_start_time=None, stored_pgid=None):
     return out
 
 
-def resource_delta(pid, interval_seconds, sleep_fn=None):
-    """Item-7 tier-2: two-sample CPU/IO delta over interval_seconds.
+def resource_delta(pid, interval_seconds, sleep_fn=None, pgid=None, agent_id=None):
+    """Two-sample CPU/IO delta over interval_seconds (or cross-call).
 
-    Returns None when either /proc sample is unavailable, else
-    {"interval_seconds", "cpu_ticks", "io_read_bytes", "io_write_bytes",
-    "moving"} where moving is True when any counter advanced. Counter
-    values that were unreadable in both samples count as 0.
+    Probes the whole process group and session with per-pid tracking (N6).
+    If agent_id is provided and a fresh persisted sample exists (0.5s - 300s),
+    uses that sample without sleeping.
     """
-    if sleep_fn is None:
-        sleep_fn = time.sleep
-    a = read_proc_resource(pid)
-    if interval_seconds and interval_seconds > 0:
-        sleep_fn(interval_seconds)
-    b = read_proc_resource(pid)
-    if a is None or b is None:
+    target_pgid = pgid or (pgid_of(pid) if pid else None)
+    if target_pgid is not None and target_pgid <= 0:
+        target_pgid = None
+    now = time.time()
+    curr_samples = sample_process_group(pid, target_pgid)
+    if curr_samples is None and pid is not None:
+        single = read_proc_resource(pid)
+        if single is not None:
+            curr_samples = {
+                str(pid): {
+                    "starttime": read_pid_start_time(pid) or 0,
+                    "cpu": single.get("cpu_ticks", 0),
+                    "io_read": single.get("io_read_bytes", 0),
+                    "io_write": single.get("io_write_bytes", 0),
+                }
+            }
+
+    if curr_samples is None:
         return None
 
-    def _d(key):
-        va, vb = a.get(key), b.get(key)
-        if va is None or vb is None:
-            return 0
-        return vb - va
+    curr_record = {"ts": now, "pids": curr_samples}
 
-    cpu = _d("cpu_ticks")
-    rd = _d("io_read_bytes")
-    wr = _d("io_write_bytes")
-    return {"interval_seconds": interval_seconds, "cpu_ticks": cpu,
-            "io_read_bytes": rd, "io_write_bytes": wr,
-            "moving": bool(cpu > 0 or rd > 0 or wr > 0)}
+    # Cross-call continuity check
+    if agent_id:
+        prev_record = load_probe_sample(agent_id)
+        if prev_record and isinstance(prev_record, dict) and "ts" in prev_record and "pids" in prev_record:
+            dt = now - float(prev_record["ts"])
+            if 0.5 <= dt <= 300.0:
+                save_probe_sample(agent_id, curr_record)
+                return compute_sample_delta(prev_record["pids"], curr_samples, dt)
+
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if interval_seconds and interval_seconds > 0:
+        sleep_fn(interval_seconds)
+
+    sample_b = sample_process_group(pid, target_pgid)
+    if sample_b is None and pid is not None:
+        single_b = read_proc_resource(pid)
+        if single_b is not None:
+            sample_b = {
+                str(pid): {
+                    "starttime": read_pid_start_time(pid) or 0,
+                    "cpu": single_b.get("cpu_ticks", 0),
+                    "io_read": single_b.get("io_read_bytes", 0),
+                    "io_write": single_b.get("io_write_bytes", 0),
+                }
+            }
+
+    if sample_b is None:
+        if agent_id:
+            save_probe_sample(agent_id, curr_record)
+        return None
+
+    dt = max(0.001, time.time() - now)
+    if agent_id:
+        save_probe_sample(agent_id, {"ts": time.time(), "pids": sample_b})
+    return compute_sample_delta(curr_samples, sample_b, dt)
 
 
 def kill_process_group(pgid, sigterm_timeout=5):
@@ -399,7 +621,7 @@ def _slot_status(now, state, running):
     return True, 0.0, "slot available"
 
 
-def _with_spawn_state(fn):
+def _with_spawn_state(fn, timeout_s=5.0):
     """Run fn(state) under the spawn lock; save state if fn returns True.
 
     The lock is held only for the (fast) read-modify-write critical
@@ -411,14 +633,27 @@ def _with_spawn_state(fn):
     lock_path = _spawn_lock_path()
     try:
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
     except OSError:
         return False, None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
+        deadline = time.monotonic() + timeout_s
+        acquired = False
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except InterruptedError:
+                continue
+            except OSError:
+                return False, None
+        if not acquired:
             return False, None
+
         try:
             state = _load_spawn_state()
             save, result = fn(state)
@@ -477,7 +712,7 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     def _fail_open(reason):
         return {"granted": True, "waited_s": 0.0, "retry_after_s": 0.0,
                 "reason": reason, "duplicate_suppressed": False,
-                "bypassed": False}
+                "bypassed": False, "fail_open": True}
 
     if no_space:
         def _do_bypass(state):
@@ -490,7 +725,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
             return _fail_open("spawn lock unavailable; fail-open")
         return {"granted": True, "waited_s": 0.0, "retry_after_s": 0.0,
                 "reason": "spacing bypassed (--no-space experiment flag)",
-                "duplicate_suppressed": False, "bypassed": True}
+                "duplicate_suppressed": False, "bypassed": True,
+                "fail_open": False}
 
     # Retry-spam guard: identical request recently deferred?
     # Inner result is always a (proceed, info) pair nested inside the
@@ -502,7 +738,7 @@ def acquire_spawn_slot(name, task, model, no_space=False,
                 return False, (False, {
                     "retry_after_s": r.get("retry_after_s", SPAWN_SPACING_S),
                     "reason": r.get("reason", "slot unavailable")})
-        return True, (True, None)
+        return False, (True, None)
     locked, dup = _with_spawn_state(_check_duplicate)
     if not locked:
         return _fail_open("spawn lock unavailable; fail-open")
@@ -511,7 +747,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
         return {"granted": False, "waited_s": 0.0,
                 "retry_after_s": dup_info["retry_after_s"],
                 "reason": dup_info["reason"],
-                "duplicate_suppressed": True, "bypassed": False}
+                "duplicate_suppressed": True, "bypassed": False,
+                "fail_open": False}
 
     def _live_running():
         if count_running is not None:
@@ -539,7 +776,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     if granted:
         return {"granted": True, "waited_s": time.time() - start,
                 "retry_after_s": 0.0, "reason": reason,
-                "duplicate_suppressed": False, "bypassed": False}
+                "duplicate_suppressed": False, "bypassed": False,
+                "fail_open": False}
 
     # Slot busy: poll (lock-free sleeps) until grant or deadline.
     while time.time() < deadline:
@@ -553,7 +791,8 @@ def acquire_spawn_slot(name, task, model, no_space=False,
         if granted:
             return {"granted": True, "waited_s": time.time() - start,
                     "retry_after_s": 0.0, "reason": reason,
-                    "duplicate_suppressed": False, "bypassed": False}
+                    "duplicate_suppressed": False, "bypassed": False,
+                    "fail_open": False}
 
     def _record_deferral(state):
         _record_request(state, name, task, model, False,
@@ -562,4 +801,207 @@ def acquire_spawn_slot(name, task, model, no_space=False,
     _with_spawn_state(_record_deferral)
     return {"granted": False, "waited_s": time.time() - start,
             "retry_after_s": retry_after, "reason": reason,
-            "duplicate_suppressed": False, "bypassed": False}
+            "duplicate_suppressed": False, "bypassed": False,
+            "fail_open": False}
+
+
+LAUNCHES_FILE = "launches.jsonl"
+
+
+def launches_path(sam_home=None):
+    from sam import config as sam_config
+    return (sam_home or sam_config.get_sam_home()) / LAUNCHES_FILE
+
+
+def record_launch(agent_id, run_id, kind, bypassed=False, fail_open=False, model=None, name=None, ts=None):
+    """Record a launch event in append-only launches.jsonl."""
+    ts = time.time() if ts is None else float(ts)
+    entry = {
+        "ts": ts,
+        "agent_id": agent_id,
+        "name": name,
+        "run_id": run_id,
+        "kind": kind,
+        "model": model,
+        "bypassed": bool(bypassed),
+        "fail_open": bool(fail_open),
+    }
+    path = launches_path()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+            f.flush()
+    except Exception:
+        pass
+
+
+def load_launches(sam_home=None):
+    """Load all launch records from launches.jsonl."""
+    path = launches_path(sam_home)
+    if not path.is_file():
+        return []
+    records = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return records
+
+
+def count_live_agents():
+    """Count running agents by inspecting true state."""
+    from sam import registry as sam_registry
+    from sam import state as sam_state
+    try:
+        reg = sam_registry.load_registry()
+        n = 0
+        for a in reg.get("agents", []):
+            try:
+                if sam_state.resolve_agent_state(
+                        a, a.get("run_id", 1)) == "running":
+                    n += 1
+            except Exception:
+                continue
+        return n
+    except Exception:
+        return 0
+
+
+def launch_gate(
+    name,
+    task,
+    model,
+    kind="spawn",
+    override_reason=None,
+    no_space=False,
+    is_infra_retry=False,
+    wait_s=None,
+    running=None,
+    count_running=None,
+):
+    """Unified launch admission gate for spawn, resume, restart, and retry.
+
+    1. Quota Circuit Breaker:
+       If not an infra retry, checks sam_retry.active_window(model).
+       If an active 429 window exists and no override_reason is provided,
+       defers with exit code 6 (quota_window).
+    2. Spacing & Concurrency Limiter:
+       Enforces global >=15s spacing and max 4 running agents via
+       acquire_spawn_slot. Bounded wait up to wait_s.
+    """
+    if count_running is None:
+        count_running = count_live_agents
+    if running is None:
+        running = count_running()
+
+    from sam import retry as sam_retry
+
+    # 1. Quota breaker
+    if not is_infra_retry:
+        sam_retry.reconcile_pending()
+        quota_window = None if override_reason else sam_retry.active_window(model)
+        if quota_window is not None:
+            retry_after = max(1, int(quota_window - time.time() + 0.5))
+            try:
+                from datetime import datetime, timezone
+                eta_str = datetime.fromtimestamp(quota_window, timezone.utc).strftime("%H:%M:%SZ")
+            except Exception:
+                eta_str = str(quota_window)
+            guidance = (
+                f"429 quota window active for model {model} "
+                f"(advisory until ~{eta_str}). "
+                f"This is NOT an error — do not abort the task. "
+                f"Fresh {kind}s defer ~{retry_after}s "
+                f"(e.g. `sleep {retry_after}` then re-run this exact {kind} "
+                f"command unchanged), or pass --override-reason 'why now' to force "
+                f"(logged), or pick a different --model. Queued infra-retries "
+                f"for this model are unaffected."
+            )
+            return {
+                "granted": False,
+                "code": 6,
+                "reason": "quota_window",
+                "message": guidance,
+                "retry_after_s": retry_after,
+                "model": model,
+                "window_until": quota_window,
+                "duplicate_suppressed": False,
+                "bypassed": False,
+                "fail_open": False,
+            }
+
+    # 2. Spacing & capacity slot acquisition
+    if wait_s is None:
+        try:
+            wait_s = float(os.environ.get("SAM_SLOT_WAIT_S", SLOT_WAIT_S))
+        except (TypeError, ValueError):
+            wait_s = SLOT_WAIT_S
+
+    slot = acquire_spawn_slot(
+        name, str(task), model, no_space=no_space, wait_s=wait_s,
+        running=running, count_running=count_running
+    )
+    if not slot["granted"]:
+        retry_after = max(1, int(slot["retry_after_s"] + 0.5))
+        guidance = (
+            f"Launch slot unavailable ({slot['reason']}). "
+            f"This is NOT an error — do not abort the task. "
+            f"Wait ~{retry_after}s (e.g. `sleep {retry_after}`) and re-run "
+            f"this exact {kind} command unchanged."
+        )
+        if slot.get("duplicate_suppressed"):
+            guidance += " (duplicate request suppressed; slot still held)"
+        return {
+            "granted": False,
+            "code": 6,
+            "reason": slot["reason"],
+            "message": guidance,
+            "retry_after_s": retry_after,
+            "duplicate_suppressed": slot.get("duplicate_suppressed", False),
+            "bypassed": False,
+            "fail_open": False,
+        }
+
+    return {
+        "granted": True,
+        "code": 0,
+        "reason": slot.get("reason", "granted"),
+        "message": "ok",
+        "retry_after_s": 0.0,
+        "waited_s": round(slot.get("waited_s", 0.0), 1),
+        "bypassed": bool(slot.get("bypassed", False)),
+        "fail_open": bool(slot.get("fail_open", False)),
+        "duplicate_suppressed": False,
+    }
+
+
+def emit_gate_rejection(gate_res, as_json):
+    """Emit formatted rejection on stderr and return exit code."""
+    import sys
+    if as_json:
+        payload = {
+            "status": "deferred",
+            "code": gate_res.get("code", 6),
+            "message": gate_res.get("message", "deferred"),
+            "retry_after_s": gate_res.get("retry_after_s", 15),
+            "reason": gate_res.get("reason", "slot_unavailable"),
+        }
+        if gate_res.get("window_until") is not None:
+            payload["window_until"] = gate_res["window_until"]
+        if "model" in gate_res:
+            payload["model"] = gate_res["model"]
+        if gate_res.get("duplicate_suppressed"):
+            payload["duplicate_suppressed"] = True
+        print(json.dumps(payload), file=sys.stderr)
+    else:
+        print(f"sam: {gate_res.get('message', 'deferred')}", file=sys.stderr)
+    return gate_res.get("code", 6)
+

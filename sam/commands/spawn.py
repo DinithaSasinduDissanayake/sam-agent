@@ -91,16 +91,7 @@ def check_depth(config):
     return depth
 
 
-def build_child_env(agent_id, model, depth):
-    env = os.environ.copy()
-    env["SAM_AGENT_ID"] = agent_id
-    env["SAM_MODEL"] = model
-    env["SAM_DEPTH"] = str(depth + 1)
-    spawner_id = os.environ.get("SAM_AGENT_ID")
-    env["SAM_PARENT_ID"] = spawner_id or ""
-    root = os.environ.get("SAM_ROOT_ID") or agent_id
-    env["SAM_ROOT_ID"] = root
-    return env
+build_child_env = sam_util.build_child_env
 
 
 def allocate_paths(paths, agent_id, run_id):
@@ -146,21 +137,6 @@ def run(args):
         # headcount is fine, same-instant spawn bursts kill. Enforced in
         # code because nested spawners ignore skill prose. Blocks up to
         # ~45 s for a slot, then defers with re-run instructions.
-        def _count_live():
-            try:
-                reg = sam_registry.load_registry()
-                n = 0
-                for a in reg.get("agents", []):
-                    try:
-                        if sam_state.resolve_agent_state(
-                                a, a.get("run_id", 1)) == "running":
-                            n += 1
-                    except Exception:
-                        continue
-                return n
-            except Exception:
-                return 0
-
         no_space = bool(getattr(args, "no_space", False))
         override_reason = (getattr(args, "override_reason", None)
                            or "").strip() or None
@@ -180,71 +156,21 @@ def run(args):
                 f"or force a different name.",
                 as_json)
 
-        # Quota breaker (IISA review item 4): fresh work of this model
-        # defers while a queued retry's advisory window is open. The
-        # queued retry itself never routes through this gate. "Resets in"
-        # is weather — overridable with a logged reason.
-        quota_window = None if override_reason else sam_retry.active_window(model)
-        if quota_window is not None:
-            retry_after = max(1, int(quota_window - time.time() + 0.5))
-            guidance = (
-                f"429 quota window active for model {model} "
-                f"(advisory until ~{_fmt_eta(quota_window)}). "
-                f"This is NOT an error — do not abort the task. "
-                f"Fresh spawns defer ~{retry_after}s "
-                f"(e.g. `sleep {retry_after}` then re-run this exact spawn "
-                f"unchanged), or pass --override-reason 'why now' to force "
-                f"(logged), or pick a different --model. Queued infra-retries "
-                f"for this model are unaffected."
-            )
-            if as_json:
-                print(json.dumps({
-                    "status": "deferred", "code": 6,
-                    "message": guidance,
-                    "retry_after_s": retry_after,
-                    "reason": "quota_window",
-                    "model": model,
-                    "window_until": quota_window,
-                }), file=sys.stderr)
-            else:
-                print(f"sam: {guidance}", file=sys.stderr)
-            return 6
+        gate_res = sam_proc.launch_gate(
+            name=name,
+            task=str(task_path),
+            model=model,
+            kind="spawn",
+            override_reason=override_reason,
+            no_space=no_space,
+            is_infra_retry=False,
+        )
+        if not gate_res["granted"]:
+            return sam_proc.emit_gate_rejection(gate_res, as_json)
 
-        # SAM_SLOT_WAIT_S is a test/ops escape hatch for the slot block
-        # (default 45 s); not a user-facing flag.
-        try:
-            slot_wait_s = float(os.environ.get("SAM_SLOT_WAIT_S",
-                                                sam_proc.SLOT_WAIT_S))
-        except (TypeError, ValueError):
-            slot_wait_s = sam_proc.SLOT_WAIT_S
-        slot = sam_proc.acquire_spawn_slot(
-            name, str(task_path), model, no_space=no_space,
-            wait_s=slot_wait_s,
-            running=_count_live(), count_running=_count_live)
-        if not slot["granted"]:
-            retry_after = max(1, int(slot["retry_after_s"] + 0.5))
-            guidance = (
-                f"Launch slot unavailable ({slot['reason']}). "
-                f"This is NOT an error — do not abort the task. "
-                f"Wait ~{retry_after}s (e.g. `sleep {retry_after}`) and re-run "
-                f"this exact spawn command unchanged."
-            )
-            if slot.get("duplicate_suppressed"):
-                guidance += " (duplicate request suppressed; slot still held)"
-            if as_json:
-                print(json.dumps({
-                    "status": "deferred", "code": 6,
-                    "message": guidance,
-                    "retry_after_s": retry_after,
-                    "reason": slot["reason"],
-                    "duplicate_suppressed": slot.get(
-                        "duplicate_suppressed", False),
-                }), file=sys.stderr)
-            else:
-                print(f"sam: {guidance}", file=sys.stderr)
-            return 6
-        spawn_waited_s = round(slot.get("waited_s", 0.0), 1)
-        spacing_bypassed = bool(slot.get("bypassed", False))
+        spawn_waited_s = gate_res["waited_s"]
+        spacing_bypassed = gate_res["bypassed"]
+        spawn_fail_open = gate_res["fail_open"]
 
         # 1-15: Lock sequence
         try:
@@ -299,9 +225,10 @@ def run(args):
                         "duration_ms": None, "restart_count": 0,
                         "killed_reason": None,
                         "launch_deadline_at": deadline,
-                    "spawn_waited_s": spawn_waited_s,
-                    "spacing_bypassed": spacing_bypassed,
-                    "quota_override_reason": override_reason,
+                        "spawn_waited_s": spawn_waited_s,
+                        "spacing_bypassed": spacing_bypassed,
+                        "fail_open": spawn_fail_open,
+                        "quota_override_reason": override_reason,
                 }
                     registry["agents"].append(entry)
                     sam_registry.save_registry(registry)
@@ -347,6 +274,16 @@ def run(args):
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+            )
+
+            sam_proc.record_launch(
+                agent_id=agent_id,
+                run_id=run_id,
+                kind="spawn",
+                bypassed=spacing_bypassed,
+                fail_open=spawn_fail_open,
+                model=model,
+                name=name,
             )
 
             # Update registry to running

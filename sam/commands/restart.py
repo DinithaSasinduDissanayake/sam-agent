@@ -48,16 +48,7 @@ def run(args):
         if ref is None:
             return _emit_error(3, "agent identifier required", as_json)
 
-        agent = None
-        for a in agents:
-            if a.get("id") == ref:
-                agent = a
-                break
-        if agent is None:
-            matches = [a for a in agents if a.get("name") == ref]
-            if matches:
-                agent = matches[0]
-
+        agent = sam_registry.resolve_ref(agents, ref)
         if agent is None:
             return _emit_error(3, f"agent not found: {ref}", as_json)
 
@@ -79,6 +70,28 @@ def run(args):
             return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
         if effort and harness != "agy":
             return _emit_error(2, "--effort requires --harness agy", as_json)
+
+        override_reason = (getattr(args, "override_reason", None) or "").strip() or None
+        no_space = bool(getattr(args, "no_space", False))
+        model = agent.get("model", "")
+        task_source = agent.get("task_path", "")
+
+        # Pre-flight state check before launch gate / slot wait
+        resolved = sam_state.resolve_agent_state(agent, agent.get("run_id", 1))
+        if resolved not in sam_state.TERMINAL_STATES and resolved != "unknown":
+            return _emit_error(6, f"agent not terminal (state={resolved})", as_json)
+
+        gate_res = sam_proc.launch_gate(
+            name=target_name,
+            task=str(task_source),
+            model=model,
+            kind="restart",
+            override_reason=override_reason,
+            no_space=no_space,
+            is_infra_retry=False,
+        )
+        if not gate_res["granted"]:
+            return sam_proc.emit_gate_rejection(gate_res, as_json)
 
         # Line 3: Acquire name lock + registry lock
         with sam_locks.name_lock(target_name, timeout=10):
@@ -181,14 +194,8 @@ def run(args):
             )
 
             # Build env (same as spawn)
-            env = os.environ.copy()
-            env["SAM_AGENT_ID"] = agent_id
-            env["SAM_MODEL"] = agent.get("model", "")
             parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
-            env["SAM_DEPTH"] = str(parent_depth + 1)
-            spawner_id = os.environ.get("SAM_AGENT_ID")
-            env["SAM_PARENT_ID"] = spawner_id or ""
-            env["SAM_ROOT_ID"] = os.environ.get("SAM_ROOT_ID") or agent_id
+            env = sam_util.build_child_env(agent_id, agent.get("model", ""), parent_depth)
 
             cwd = agent.get("cwd", os.getcwd())
 
@@ -201,6 +208,15 @@ def run(args):
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                     close_fds=True,
+                )
+                sam_proc.record_launch(
+                    agent_id=agent_id,
+                    run_id=run_count,
+                    kind="restart",
+                    bypassed=gate_res.get("bypassed", False),
+                    fail_open=gate_res.get("fail_open", False),
+                    model=model,
+                    name=target_name,
                 )
             except Exception as e:
                 # Line 18: Popen failed — mark failed

@@ -704,8 +704,11 @@ def _apply_proc_liveness(out, agent, stall_seconds=DEFAULT_STALL_SECONDS,
                         % (" + pgid" if liv.get("pgid_match") else ""))
         if out.get("activity_state") != "silent":
             return out
+        pgid = agent.get("pgid")
         delta = sam_proc.resource_delta(pid, RESOURCE_PROBE_S,
-                                        sleep_fn=sleep_fn)
+                                        sleep_fn=sleep_fn, pgid=pgid,
+                                        agent_id=agent.get("id"))
+        out["resource_delta"] = delta
         if delta is None:
             evidence.append("resource probe: unavailable (process gone?)")
         else:
@@ -795,20 +798,27 @@ def summarize_liveness(act):
                  `alive (no task signal Xm)` — never bare "stalled"
       <state>  — lifecycle state itself for terminal/spawning/unknown/
                  error rows (incl. partial / awaiting_retry)
-    Returns {"verdict", "signal", "age"}; age is seconds or None. For
-    verdict "alive", signal is "no task signal" and age is the time since
+    Returns {"verdict", "signal", "age", "movement"}; age is seconds or None.
+    movement is "moving" | "still" | None.
+    For verdict "alive", signal is "no task signal" and age is the time since
     the most recent observable file signal (None when no files exist).
     """
+    res_delta = (act or {}).get("resource_delta")
+    movement = None
+    if res_delta is not None and isinstance(res_delta, dict):
+        movement = "moving" if res_delta.get("moving") else "still"
+
     state = (act or {}).get("activity_state", "?")
     if state in sam_state.TERMINAL_STATES or \
             state in ("spawning", "unknown", "error"):
-        return {"verdict": state, "signal": "lifecycle", "age": None}
+        return {"verdict": state, "signal": "lifecycle", "age": None, "movement": movement}
     if state == "tool_pending":
         pending = ((act.get("session") or {}).get("pending_tool_call_ids")
                    or [])
         return {"verdict": "working",
                 "signal": "tool:%s" % (pending[0] if pending else "pending"),
-                "age": None}
+                "age": None,
+                "movement": movement}
     signals = []
     ss = act.get("session") or {}
     lg = act.get("log") or {}
@@ -826,22 +836,22 @@ def summarize_liveness(act):
     if not signals:
         if state == "waiting_or_idle":
             return {"verdict": "quiet-start", "signal": "nofiles",
-                    "age": None}
+                    "age": None, "movement": movement}
         if state == "silent":
             if proc_ok is False:
-                return {"verdict": "unknown", "signal": "proc", "age": None}
+                return {"verdict": "unknown", "signal": "proc", "age": None, "movement": movement}
             return {"verdict": "alive", "signal": "no task signal",
-                    "age": None}
-        return {"verdict": state, "signal": "nofiles", "age": None}
+                    "age": None, "movement": movement}
+        return {"verdict": state, "signal": "nofiles", "age": None, "movement": movement}
     kind, age = min(signals, key=lambda x: x[1])
     if state == "active_recent_event":
-        return {"verdict": "active", "signal": kind, "age": age}
+        return {"verdict": "active", "signal": kind, "age": age, "movement": movement}
     if state == "waiting_or_idle":
-        return {"verdict": "idle", "signal": kind, "age": age}
+        return {"verdict": "idle", "signal": kind, "age": age, "movement": movement}
     # silent (or any other file-observed running label): proc-gated wording.
     if proc_ok is False:
-        return {"verdict": "unknown", "signal": "proc", "age": None}
-    return {"verdict": "alive", "signal": "no task signal", "age": age}
+        return {"verdict": "unknown", "signal": "proc", "age": None, "movement": movement}
+    return {"verdict": "alive", "signal": "no task signal", "age": age, "movement": movement}
 
 
 def quick_liveness(agent, lifecycle_state,
