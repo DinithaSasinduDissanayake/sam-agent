@@ -90,6 +90,27 @@ def _emit_error(code, message, as_json):
     return code
 
 
+def _print_partial(agent, data, exit_code, as_json):
+    """F20: a partial run's captured text is the deliverable to verify."""
+    text = data.get("result_partial")
+    partial_path = data.get("partial_path")
+    if as_json:
+        print(json.dumps({"status": "partial", "agent_id": agent.get("id"),
+                          "exit_code": exit_code, "result": None,
+                          "result_partial": text, "partial_path": partial_path}))
+        return 0
+    if not isinstance(text, str) or not text:
+        return _emit_error(1, "result unavailable (partial run has no captured "
+                              "text; see PARTIAL.md in the run directory)", as_json)
+    sys.stdout.write("PARTIAL — the run failed after producing output; verify the "
+                     "workspace files before respawning. See %s\n\n"
+                     % (partial_path or "PARTIAL.md"))
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
 def run(args):
     as_json = getattr(args, "json", False)
     try:
@@ -129,6 +150,8 @@ def run(args):
         status = data.get("final_state_hint") or agent.get("state") or "unknown"
         exit_code = data.get("exit_code")
 
+        if status == "partial":
+            return _print_partial(agent, data, exit_code, as_json)
         if status in ("failed", "killed"):
             return _emit_error(1, "result unavailable (run did not complete successfully)", as_json)
 
