@@ -339,7 +339,10 @@ def _print_activity_detail(act, indent=""):
     ss = act.get("session") or {}
     lg = act.get("log") or {}
     watch = act.get("watch")
-    print(f"{indent}Liveness: {_fmt_liveness(act.get('liveness'))}")
+    liv = act.get('liveness') or {}
+    print(f"{indent}Liveness: {_fmt_liveness(liv)}")
+    if liv.get("movement"):
+        print(f"{indent}  movement: {liv.get('movement')}")
     print(f"{indent}Activity: {st}")
     print(f"{indent}  lifecycle: {act.get('lifecycle_state', '?')}")
     if ss.get("error"):
@@ -434,10 +437,6 @@ def _fmt_liveness(liv):
         if age is None:
             return "alive (no task signal)"
         return "alive (no task signal %s)" % _fmt_silence(age)
-    if verdict.startswith("alive"):
-        if age is None:
-            return "%s (%s)" % (verdict, signal)
-        return "%s (%s %s)" % (verdict, signal, _fmt_silence(age))
     if age is None:
         return "%s" % verdict
     return "%s %s (%s)" % (verdict, _fmt_age(age), signal)

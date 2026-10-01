@@ -185,17 +185,73 @@ def read_proc_resource(pid):
             "io_read_bytes": io_read, "io_write_bytes": io_write}
 
 
-def read_group_resource(pgid):
-    """Enumerate /proc/*/stat for pgrp == pgid, sum utime+stime,
-    and sum rchar/wchar from /proc/<pid>/io.
-    """
-    if pgid is None:
-        return None
-    total_cpu = 0
-    total_rchar = 0
-    total_wchar = 0
-    found_any = False
+PROBE_DIR = "probe"
 
+
+def probe_dir(sam_home=None):
+    from sam import config as sam_config
+    return (sam_home or sam_config.get_sam_home()) / PROBE_DIR
+
+
+def probe_path(agent_id, sam_home=None):
+    return probe_dir(sam_home) / f"{agent_id}.json"
+
+
+def load_probe_sample(agent_id, sam_home=None):
+    p = probe_path(agent_id, sam_home)
+    if not p.is_file():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_probe_sample(agent_id, sample, sam_home=None):
+    p = probe_path(agent_id, sam_home)
+    try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix="probe.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(sample, f)
+            f.flush()
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def sample_process_group(pid, pgid=None):
+    """Enumerate processes in the target's process group or session.
+
+    Matches pgrp == target_pgid or session == target_sid.
+    Returns dict: str(pid) -> {"starttime": int, "cpu": int, "io_read": int, "io_write": int}
+    """
+    if pid is None and pgid is None:
+        return None
+    target_pgid = pgid or (pgid_of(pid) if pid else None)
+    if target_pgid is not None and target_pgid <= 0:
+        target_pgid = None
+    target_sid = None
+    if pid is not None:
+        try:
+            with open(f"/proc/{pid}/stat", "r") as f:
+                data = f.read()
+            lp = data.rfind(")")
+            if lp != -1:
+                fields = data[lp + 1:].strip().split()
+                if len(fields) > 3:
+                    sid_val = int(fields[3])  # session id (field 3)
+                    if sid_val > 0:
+                        target_sid = sid_val
+        except Exception:
+            pass
+
+    if target_pgid is None and target_sid is None:
+        return None
+
+    samples = {}
     try:
         proc_entries = os.listdir("/proc")
     except OSError:
@@ -204,8 +260,8 @@ def read_group_resource(pgid):
     for entry in proc_entries:
         if not entry.isdigit():
             continue
-        pid_str = entry
-        stat_path = f"/proc/{pid_str}/stat"
+        p_int = int(entry)
+        stat_path = f"/proc/{entry}/stat"
         try:
             with open(stat_path, "r") as f:
                 data = f.read()
@@ -213,35 +269,103 @@ def read_group_resource(pgid):
             if lp == -1:
                 continue
             fields = data[lp + 1:].strip().split()
-            # after comm: state(0), pgrp(1), session(2), ... utime(11), stime(12)
-            if len(fields) < 13:
+            if len(fields) < 20:
                 continue
             pgrp = int(fields[2])
-            if pgrp != pgid:
+            sid = int(fields[3])
+            matched = False
+            if target_pgid is not None and pgrp == target_pgid:
+                matched = True
+            elif target_sid is not None and sid == target_sid:
+                matched = True
+            if not matched:
                 continue
-            found_any = True
-            total_cpu += int(fields[11]) + int(fields[12])
+            utime = int(fields[11])
+            stime = int(fields[12])
+            starttime = int(fields[19])
         except (OSError, ValueError, IndexError):
             continue
 
-        io_path = f"/proc/{pid_str}/io"
+        rchar = 0
+        wchar = 0
+        io_path = f"/proc/{entry}/io"
         try:
             with open(io_path, "r") as f:
                 for line in f:
                     if line.startswith("rchar:"):
-                        total_rchar += int(line.split()[1])
+                        rchar = int(line.split()[1])
                     elif line.startswith("wchar:"):
-                        total_wchar += int(line.split()[1])
+                        wchar = int(line.split()[1])
         except (OSError, ValueError, IndexError):
             pass
 
-    if not found_any:
-        return None
+        samples[str(p_int)] = {
+            "starttime": starttime,
+            "cpu": utime + stime,
+            "io_read": rchar,
+            "io_write": wchar,
+        }
 
+    return samples if samples else None
+
+
+def read_group_resource(pgid):
+    """Enumerate /proc/*/stat for pgrp == pgid, sum utime+stime,
+    and sum rchar/wchar from /proc/<pid>/io.
+    """
+    samples = sample_process_group(pgid, pgid)
+    if not samples:
+        return None
+    total_cpu = sum(s["cpu"] for s in samples.values())
+    total_rd = sum(s["io_read"] for s in samples.values())
+    total_wr = sum(s["io_write"] for s in samples.values())
     return {
         "cpu_ticks": total_cpu,
-        "io_read_bytes": total_rchar,
-        "io_write_bytes": total_wchar,
+        "io_read_bytes": total_rd,
+        "io_write_bytes": total_wr,
+    }
+
+
+def compute_sample_delta(sample_a, sample_b, interval_seconds):
+    """Compute per-pid resource deltas between sample_a and sample_b.
+
+    Per N6:
+    - Match processes present in both samples by (pid, starttime).
+    - New pids count as movement.
+    - Exited children do not subtract counters or hide sibling activity.
+    """
+    if sample_a is None or sample_b is None:
+        return None
+
+    total_cpu_delta = 0
+    total_rd_delta = 0
+    total_wr_delta = 0
+    moving = False
+
+    for pid, b_data in sample_b.items():
+        if pid not in sample_a or sample_a[pid].get("starttime") != b_data.get("starttime"):
+            # New process spawned in the group
+            moving = True
+            total_cpu_delta += b_data.get("cpu", 0)
+            total_rd_delta += b_data.get("io_read", 0)
+            total_wr_delta += b_data.get("io_write", 0)
+        else:
+            a_data = sample_a[pid]
+            c_delta = max(0, b_data.get("cpu", 0) - a_data.get("cpu", 0))
+            r_delta = max(0, b_data.get("io_read", 0) - a_data.get("io_read", 0))
+            w_delta = max(0, b_data.get("io_write", 0) - a_data.get("io_write", 0))
+            if c_delta > 0 or r_delta > 0 or w_delta > 0:
+                moving = True
+            total_cpu_delta += c_delta
+            total_rd_delta += r_delta
+            total_wr_delta += w_delta
+
+    return {
+        "interval_seconds": interval_seconds,
+        "cpu_ticks": total_cpu_delta,
+        "io_read_bytes": total_rd_delta,
+        "io_write_bytes": total_wr_delta,
+        "moving": moving,
     }
 
 
@@ -285,43 +409,71 @@ def proc_liveness(pid, stored_start_time=None, stored_pgid=None):
     return out
 
 
-def resource_delta(pid, interval_seconds, sleep_fn=None, pgid=None):
-    """Item-7 tier-2: two-sample CPU/IO delta over interval_seconds.
+def resource_delta(pid, interval_seconds, sleep_fn=None, pgid=None, agent_id=None):
+    """Two-sample CPU/IO delta over interval_seconds (or cross-call).
 
-    Probes the whole process group: enumerates /proc/*/stat for pgrp == pgid,
-    sums utime+stime and /proc/<pid>/io rchar/wchar. Falls back to single pid.
-
-    Returns None when either /proc sample is unavailable, else
-    {"interval_seconds", "cpu_ticks", "io_read_bytes", "io_write_bytes",
-    "moving"} where moving is True when any counter advanced. Counter
-    values that were unreadable in both samples count as 0.
+    Probes the whole process group and session with per-pid tracking (N6).
+    If agent_id is provided and a fresh persisted sample exists (0.5s - 300s),
+    uses that sample without sleeping.
     """
-    if sleep_fn is None:
-        sleep_fn = time.sleep
-    target_pgid = pgid or pgid_of(pid) or pid
-    a = read_group_resource(target_pgid)
-    if a is None:
-        a = read_proc_resource(pid)
-    if interval_seconds and interval_seconds > 0:
-        sleep_fn(interval_seconds)
-    b = read_group_resource(target_pgid)
-    if b is None:
-        b = read_proc_resource(pid)
-    if a is None or b is None:
+    target_pgid = pgid or (pgid_of(pid) if pid else None)
+    if target_pgid is not None and target_pgid <= 0:
+        target_pgid = None
+    now = time.time()
+    curr_samples = sample_process_group(pid, target_pgid)
+    if curr_samples is None and pid is not None:
+        single = read_proc_resource(pid)
+        if single is not None:
+            curr_samples = {
+                str(pid): {
+                    "starttime": read_pid_start_time(pid) or 0,
+                    "cpu": single.get("cpu_ticks", 0),
+                    "io_read": single.get("io_read_bytes", 0),
+                    "io_write": single.get("io_write_bytes", 0),
+                }
+            }
+
+    if curr_samples is None:
         return None
 
-    def _d(key):
-        va, vb = a.get(key), b.get(key)
-        if va is None or vb is None:
-            return 0
-        return vb - va
+    curr_record = {"ts": now, "pids": curr_samples}
 
-    cpu = _d("cpu_ticks")
-    rd = _d("io_read_bytes")
-    wr = _d("io_write_bytes")
-    return {"interval_seconds": interval_seconds, "cpu_ticks": cpu,
-            "io_read_bytes": rd, "io_write_bytes": wr,
-            "moving": bool(cpu > 0 or rd > 0 or wr > 0)}
+    # Cross-call continuity check
+    if agent_id:
+        prev_record = load_probe_sample(agent_id)
+        if prev_record and isinstance(prev_record, dict) and "ts" in prev_record and "pids" in prev_record:
+            dt = now - float(prev_record["ts"])
+            if 0.5 <= dt <= 300.0:
+                save_probe_sample(agent_id, curr_record)
+                return compute_sample_delta(prev_record["pids"], curr_samples, dt)
+
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if interval_seconds and interval_seconds > 0:
+        sleep_fn(interval_seconds)
+
+    sample_b = sample_process_group(pid, target_pgid)
+    if sample_b is None and pid is not None:
+        single_b = read_proc_resource(pid)
+        if single_b is not None:
+            sample_b = {
+                str(pid): {
+                    "starttime": read_pid_start_time(pid) or 0,
+                    "cpu": single_b.get("cpu_ticks", 0),
+                    "io_read": single_b.get("io_read_bytes", 0),
+                    "io_write": single_b.get("io_write_bytes", 0),
+                }
+            }
+
+    if sample_b is None:
+        if agent_id:
+            save_probe_sample(agent_id, curr_record)
+        return None
+
+    dt = max(0.001, time.time() - now)
+    if agent_id:
+        save_probe_sample(agent_id, {"ts": time.time(), "pids": sample_b})
+    return compute_sample_delta(curr_samples, sample_b, dt)
 
 
 def kill_process_group(pgid, sigterm_timeout=5):
