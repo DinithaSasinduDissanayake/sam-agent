@@ -442,6 +442,21 @@ def _fmt_liveness(liv):
     return "%s %s (%s)" % (verdict, _fmt_age(age), signal)
 
 
+def _runner_status(agent):
+    """Crash-safe breadcrumb written by sam/runner.py next to result.json
+    (phase starting/running/finished). None for legacy-wrapper runs."""
+    result_path = agent.get("result_path")
+    if not result_path:
+        return None
+    path = os.path.join(os.path.dirname(result_path), "runner.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _fetch_remote(remotes, show_all):
     """`sam status --json` of other machines over ssh (one dashboard, many hosts).
 
@@ -541,6 +556,9 @@ def run(args):
             agent["activity"] = _compute_activity(
                 agent, agent["resolved_state"], stall_seconds, watch)
 
+        if agent.get("resolved_state") in ("unknown", "running", "spawning"):
+            agent["runner_status"] = _runner_status(agent)
+
         if agent.get("resolved_state") == "awaiting_retry":
             try:
                 from sam import retry as _retry
@@ -565,6 +583,11 @@ def run(args):
                       f"{_fmt_elapsed(agent):8s}")
                 if s in ("failed", "unknown"):
                     print(_HINT_LEGEND)
+            if s == "unknown" and agent.get("runner_status"):
+                print(f"  Runner died in phase '{agent['runner_status'].get('phase')}' "
+                      f"(killed, sign-out, reboot or power loss). Its whole process tree "
+                      f"went down with it. Continue with: sam resume "
+                      f"{agent.get('name','?')} --task <file>")
             if s == "awaiting_retry":
                 item = agent.get("retry") or {}
                 print(f"  Retry: fires ~{_fmt_epoch(item.get('not_before'))} "
