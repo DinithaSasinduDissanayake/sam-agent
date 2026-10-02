@@ -203,6 +203,13 @@ def detect_infra_failure(result, log_text=None):
         return None, ""
     if result.get("final_state_hint") == "partial":
         return None, ""  # deliverables captured; parent decides
+    if "infra_hint" in result:
+        # The generic runner classified the failure itself (from the harness's
+        # error events, never from model text). Trust it; skip the text grep.
+        hint = result.get("infra_hint")
+        if hint in ("quota", "startup-network"):
+            return hint, str(result.get("error") or "")
+        return None, ""
     exit_code = result.get("exit_code")
     if exit_code in (0, None) and result.get("exit_signal") is None:
         # clean exit or unknown — not an infra death

@@ -69,6 +69,9 @@ def main():
                           help="Max agents to list (default 10 newest, --all for full)")
     p_status.add_argument("--fields", default=None,
                           help="Comma list for --json (e.g. name,state,elapsed)")
+    p_status.add_argument("--remote", action="append", default=None, metavar="SSH_HOST",
+                          help="Also list agents of another machine (runs `sam status --json` "
+                               "there over ssh; repeatable)")
     p_status.add_argument("--detail", action="store_true",
                           help="Show detailed activity signals (read-only, opt-in)")
     p_status.add_argument("--watch", nargs="?", const=5, type=int, default=None,

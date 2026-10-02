@@ -442,6 +442,33 @@ def _fmt_liveness(liv):
     return "%s %s (%s)" % (verdict, _fmt_age(age), signal)
 
 
+def _fetch_remote(remotes, show_all):
+    """`sam status --json` of other machines over ssh (one dashboard, many hosts).
+
+    Each remote is an ssh host alias. Failures are warnings, never fatal.
+    """
+    import subprocess
+    rows = []
+    for alias in remotes:
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias,
+               "sam status --json" + (" --all" if show_all else "")]
+        try:
+            cp = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                encoding="utf-8", errors="replace")
+            data = json.loads(cp.stdout)
+            if not isinstance(data, list):
+                raise ValueError("not a list")
+        except Exception as e:
+            print(f"sam: warning: remote {alias} unavailable: {e}", file=sys.stderr)
+            continue
+        for entry in data:
+            if isinstance(entry, dict):
+                entry.setdefault("host", alias)
+                entry["remote"] = alias
+                rows.append(entry)
+    return rows
+
+
 def run(args):
     as_json = getattr(args, "json", False)
     try:
@@ -602,6 +629,18 @@ def run(args):
         resolved_list = resolved_list[:limit]
     elif not show_all:
         resolved_list = resolved_list[:10]
+
+    remotes = getattr(args, "remote", None) or []
+    if remotes:
+        resolved_list.extend(_fetch_remote(remotes, show_all))
+        if not as_json and not detail:
+            print(f"{'NAME':20s} {'STATE':15s} {'AGE':8s} {'HOST':12s}")
+            print("-" * 58)
+            for a in resolved_list:
+                s = a.get("resolved_state", "?")
+                print(f"{a.get('name','?'):20s} {_fmt_state(s):15s} "
+                      f"{_fmt_elapsed(a):8s} {str(a.get('host','?')):12s}")
+            return 0
 
     if detail and watch is not None and len(resolved_list) >= _WATCH_WARN_THRESHOLD:
         print(f"sam: warning: --watch on {len(resolved_list)} agents may be "
