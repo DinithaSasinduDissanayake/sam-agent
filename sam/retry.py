@@ -21,6 +21,7 @@ import random
 import time
 
 from sam import config as sam_config
+from sam import plat as sam_plat
 
 QUEUE_FILE = "retry_queue.json"
 DEAD_FILE = "retry_dead.json"
@@ -84,7 +85,7 @@ def save_queue(items):
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp, path)
+        sam_plat.replace(tmp, path)
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -127,7 +128,7 @@ def save_dead(items):
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp, path)
+        sam_plat.replace(tmp, path)
         try:
             os.chmod(path, 0o600)
         except OSError:

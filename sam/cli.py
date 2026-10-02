@@ -11,9 +11,16 @@ import sys
 
 
 def main():
-    if sys.platform != "linux":
-        print("sam: unsupported platform — SAM requires Linux", file=sys.stderr)
+    if sys.platform not in ("linux", "win32"):
+        print("sam: unsupported platform — SAM requires Linux or Windows", file=sys.stderr)
         sys.exit(1)
+    if sys.platform == "win32":
+        # Console default is cp1252: never crash on non-ASCII agent output.
+        for _stream in (sys.stdout, sys.stderr):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, ValueError):
+                pass
 
     # Base parser with shared global flags (add_help=False to avoid duplicate -h)
     base_parser = argparse.ArgumentParser(add_help=False)

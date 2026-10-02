@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from sam import config as sam_config
+from sam import plat as sam_plat
 
 
 class RegistryCorrupt(Exception):
@@ -34,7 +35,7 @@ def load_registry():
         return {"version": 1, "agents": []}
 
     try:
-        raw_text = path.read_text(encoding="utf-8")
+        raw_text = sam_plat.read_text(path)
     except OSError as e:
         raise RegistryCorrupt(f"Cannot read registry file: {e}") from e
 
@@ -104,19 +105,15 @@ def save_registry(data):
         os.close(fd)
         fd = None
 
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        fd = os.open(tmp_path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
         os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
         os.fsync(fd)
         os.close(fd)
         fd = None
 
-        os.replace(tmp_path, str(path))
+        sam_plat.replace(tmp_path, str(path))
 
-        dir_fd = os.open(str(dir_path), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        sam_plat.fsync_dir(dir_path)
 
     except BaseException:
         if fd is not None:

@@ -46,7 +46,7 @@ def build_child_env(agent_id, model, depth, harness=None):
     env = os.environ.copy()
     for var in STRIP_ENV_VARS:
         env.pop(var, None)
-    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+    if hasattr(os, "getuid") and "DBUS_SESSION_BUS_ADDRESS" not in env:
         uid_bus = f"/run/user/{os.getuid()}/bus"
         if os.path.exists(uid_bus):
             env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={uid_bus}"
@@ -129,7 +129,9 @@ def snapshot_task_file(src, dst):
     data = Path(src).read_bytes()
     dst = Path(dst)
     dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    # Windows: mode 0o400 sets the read-only attribute, which blocks later cleanup.
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                 0o600 if os.name == "nt" else 0o400)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
         f.flush()

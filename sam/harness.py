@@ -244,7 +244,7 @@ class Harness:
 
     def logs(self, log_path, n=50, raw=False):
         """Tail log file; strips sentinel markers unless raw=True."""
-        with open(log_path, "r", errors="replace") as f:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
         if n and n > 0:
             lines = lines[-n:]

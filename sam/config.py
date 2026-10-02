@@ -9,6 +9,8 @@ import os
 import shutil
 from pathlib import Path
 
+from sam import plat as sam_plat
+
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -361,7 +363,7 @@ def _write_file_atomic(path: Path, data: str, mode: int) -> None:
 
         fd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
+            os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
             mode,
         )
         os.write(fd, data.encode("utf-8"))
@@ -369,14 +371,10 @@ def _write_file_atomic(path: Path, data: str, mode: int) -> None:
         os.close(fd)
         fd = None
 
-        os.replace(tmp_path, str(path))
+        sam_plat.replace(tmp_path, str(path))
 
-        # fsync the parent directory to ensure metadata is on disk
-        dir_fd = os.open(str(directory), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        # fsync the parent directory to ensure metadata is on disk (POSIX only)
+        sam_plat.fsync_dir(directory)
 
     except Exception:
         # Clean up temp file on failure

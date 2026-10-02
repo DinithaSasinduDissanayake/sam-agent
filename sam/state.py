@@ -129,7 +129,7 @@ def _read_result_file(result_path):
     import json
     try:
         if result_path and __import__('os').path.exists(result_path):
-            with open(result_path) as f:
+            with open(result_path, encoding="utf-8") as f:
                 return json.load(f)
     except Exception:
         pass

@@ -89,7 +89,7 @@ def run(args):
 
         if not follow:
             # Non-follow: read and print
-            with open(log_path, "r", errors="replace") as f:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
 
             if n > 0:
@@ -109,7 +109,7 @@ def run(args):
             return 0
 
         # Follow mode
-        with open(log_path, "r", errors="replace") as f:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             # Seek near end for -n
             if n > 0:
                 lines = f.readlines()

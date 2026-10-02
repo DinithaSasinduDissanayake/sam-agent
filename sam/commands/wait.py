@@ -179,7 +179,7 @@ def run(args):
         result_path = agent.get("result_path")
         if result_path and os.path.exists(result_path):
             try:
-                with open(result_path) as f:
+                with open(result_path, encoding="utf-8") as f:
                     result_dict = json.load(f)
             except Exception:
                 pass
