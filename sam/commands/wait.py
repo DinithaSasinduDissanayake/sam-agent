@@ -109,7 +109,7 @@ def run(args):
                                 break
                             time.sleep(0.2)
                         if sam_proc.proc_alive(pgid) and owned_group():
-                            sam_proc.killpg(pgid, signal.SIGKILL)
+                            sam_proc.killpg(pgid, sam_proc.SIGKILL)
                             time.sleep(1.0)
                 except Exception:
                     pass

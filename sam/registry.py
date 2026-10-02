@@ -59,6 +59,7 @@ def load_registry():
     for agent in data["agents"]:
         if isinstance(agent, dict):
             agent.setdefault("archived", False)
+            agent.setdefault("host", sam_plat.hostname())
             agent.setdefault(
                 "harness",
                 "agy" if agent.get("conversation_id") else "pi",

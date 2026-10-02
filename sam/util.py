@@ -98,6 +98,42 @@ def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
     return popen_detached(launcher_argv(argv, harness), cwd, env)
 
 
+def is_temp_path(path):
+    """True when ``path`` is inside a directory the OS may wipe (temp dirs)."""
+    import tempfile
+    p = os.path.normcase(os.path.abspath(str(path)))
+    roots = [tempfile.gettempdir()]
+    if os.name != "nt":
+        roots += ["/tmp", "/var/tmp", "/dev/shm"]
+    for root in roots:
+        r = os.path.normcase(os.path.abspath(root))
+        try:
+            if os.path.commonpath([p, r]) == r:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def default_workspace(name, task):
+    """Working directory used when spawn gets no --cwd.
+
+    $SAM_WORKSPACE_MODE: "task-dir" = always the task file's directory (legacy);
+    "auto" (default) = the task file's directory unless that is a temp
+    directory, in which case the persistent <SAM_HOME>/workspaces/<name> is
+    created and used. A default workspace is therefore never a temp dir.
+    """
+    from sam import config as sam_config
+    task_dir = Path(task).parent.resolve()
+    if os.environ.get("SAM_WORKSPACE_MODE", "auto") == "task-dir":
+        return task_dir
+    if not is_temp_path(task_dir):
+        return task_dir
+    ws = sam_config.get_sam_home() / "workspaces" / name
+    ws.mkdir(parents=True, exist_ok=True)
+    return ws
+
+
 def popen_detached(argv, cwd, env):
     """Start the wrapper/runner detached. Fixes $PWD first (a harness may trust
     an inherited $PWD over the real working directory)."""

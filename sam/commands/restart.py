@@ -66,10 +66,9 @@ def run(args):
             return _emit_error(2, str(e), as_json)
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
-        if harness == "agy" and thinking:
-            return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
-        if effort and harness != "agy":
-            return _emit_error(2, "--effort requires --harness agy", as_json)
+        reason_err = sam_harness.reasoning_error(harness, thinking, effort)
+        if reason_err:
+            return _emit_error(2, reason_err, as_json)
 
         override_reason = (getattr(args, "override_reason", None) or "").strip() or None
         no_space = bool(getattr(args, "no_space", False))
@@ -122,7 +121,7 @@ def run(args):
                         not sam_harness.read_conversation_id(prev_session)):
                     return _emit_error(1, "no valid conversation_id pointer; use spawn not restart", as_json)
                 h = sam_harness.get_harness(harness)
-                wrapper = sam_config.wrapper_path(harness=harness)
+                wrapper = sam_config.launcher_path(harness)
                 if not wrapper.is_file():
                     return _emit_error(1, "wrapper not installed; run sam init first", as_json)
                 task_source = agent.get("task_path")
@@ -169,7 +168,7 @@ def run(args):
                 agent["harness"] = harness
                 # Reasoning overrides apply to the new run; a harness switch
                 # clears the other harness's stale setting.
-                if harness == "agy":
+                if sam_harness.uses_effort(harness):
                     agent["effort"] = effort
                     agent["thinking"] = None
                 else:
@@ -188,27 +187,21 @@ def run(args):
                 agent["session_path"],
                 agent["task_path"],
                 agent["result_path"],
-                thinking=thinking if harness != "agy" else None,
-                effort=effort if harness == "agy" else None,
+                thinking=None if sam_harness.uses_effort(harness) else thinking,
+                effort=effort if sam_harness.uses_effort(harness) else None,
                 resume=harness == "agy",
             )
+            argv = sam_util.launcher_argv(argv, harness)
 
             # Build env (same as spawn)
             parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
-            env = sam_util.build_child_env(agent_id, agent.get("model", ""), parent_depth)
+            env = sam_util.build_child_env(agent_id, agent.get("model", ""), parent_depth, harness=harness)
 
             cwd = agent.get("cwd", os.getcwd())
 
             try:
                 # Line 17: Popen
-                proc = subprocess.Popen(
-                    argv, cwd=cwd, env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
+                proc = sam_util.popen_detached(argv, cwd, env)
                 sam_proc.record_launch(
                     agent_id=agent_id,
                     run_id=run_count,
@@ -249,7 +242,7 @@ def run(args):
                             sam_registry.save_registry(registry)
                         except Exception:
                             # Line 23: Save failed — kill orphan
-                            sam_proc.killpg(proc.pid, signal.SIGKILL)
+                            sam_proc.killpg(proc.pid, sam_proc.SIGKILL)
                             return _emit_error(1, "restart PID persist failed", as_json)
                         break
 

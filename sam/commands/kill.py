@@ -140,7 +140,7 @@ def run(args):
 
         # Line 15: If still alive, send SIGKILL
         if sam_proc.proc_alive(target_pgid):
-            sam_proc.killpg(target_pgid, signal.SIGKILL)
+            sam_proc.killpg(target_pgid, sam_proc.SIGKILL)
             time.sleep(2.0)
 
         # Line 16: Re-enter lock to confirm

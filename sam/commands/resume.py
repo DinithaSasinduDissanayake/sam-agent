@@ -60,10 +60,9 @@ def run(args):
                  or sam_config.resolve_model(None, harness, config))
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
-        if harness == "agy" and thinking:
-            return _emit(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
-        if effort and harness != "agy":
-            return _emit(2, "--effort requires --harness agy", as_json)
+        reason_err = sam_harness.reasoning_error(harness, thinking, effort)
+        if reason_err:
+            return _emit(2, reason_err, as_json)
 
         infra_retry = bool(getattr(args, "_infra_retry", False))
         override_reason = (getattr(args, "override_reason", None) or "").strip() or None
@@ -138,12 +137,12 @@ def run(args):
                     # happen on an infra retry — fresh conversation, same
                     # agent and task. Plain resume still requires the pointer.
                     resume_flag = True
-                    if harness == "agy" and not sam_harness.read_conversation_id(session_path):
+                    if sam_harness.is_pointer_harness(harness) and not sam_harness.read_conversation_id(session_path):
                         if not infra_retry:
                             return _emit(1, "no valid conversation_id pointer; use spawn not resume", as_json)
                         resume_flag = False
                     h = sam_harness.get_harness(harness)
-                    wrapper = sam_config.wrapper_path(harness=harness)
+                    wrapper = sam_config.launcher_path(harness)
                     if not wrapper.is_file():
                         return _emit(1, "wrapper not installed; run sam init first", as_json)
 
@@ -196,7 +195,7 @@ def run(args):
                     # Reasoning overrides apply to the continued run. Resume
                     # never changes harness, so only the active harness's
                     # setting is stored and the other's is cleared.
-                    if harness == "agy":
+                    if sam_harness.uses_effort(harness):
                         agent["effort"] = effort
                         agent["thinking"] = None
                     else:
@@ -218,24 +217,18 @@ def run(args):
             agent["session_path"],
             str(sam_task_path),
             agent["result_path"],
-            thinking=thinking if harness != "agy" else None,
-            effort=effort if harness == "agy" else None,
+            thinking=None if sam_harness.uses_effort(harness) else thinking,
+            effort=effort if sam_harness.uses_effort(harness) else None,
             resume=resume_flag,
         )
+        argv = sam_util.launcher_argv(argv, harness)
 
         parent_depth = int(os.environ.get("SAM_DEPTH", "0"))
-        env = sam_util.build_child_env(agent_id, model, parent_depth)
+        env = sam_util.build_child_env(agent_id, model, parent_depth, harness=harness)
         cwd = agent.get("cwd", os.getcwd())
 
         try:
-            proc = subprocess.Popen(
-                argv, cwd=cwd, env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
+            proc = sam_util.popen_detached(argv, cwd, env)
             sam_proc.record_launch(
                 agent_id=agent_id,
                 run_id=run_count,
@@ -274,7 +267,7 @@ def run(args):
                             "%Y-%m-%dT%H:%M:%SZ")
                         sam_registry.save_registry(reg)
                     except Exception:
-                        sam_proc.killpg(proc.pid, signal.SIGKILL)
+                        sam_proc.killpg(proc.pid, sam_proc.SIGKILL)
                         return _emit(1, "resume PID persist failed", as_json)
                     break
 

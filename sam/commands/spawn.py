@@ -22,7 +22,9 @@ if str(_SAM_PKG) not in sys.path:
     sys.path.insert(0, str(_SAM_PKG))
 
 from sam import config as sam_config
+from sam import harness as sam_harness
 from sam import locks as sam_locks
+from sam import plat as sam_plat
 from sam import proc as sam_proc
 from sam import registry as sam_registry
 from sam import state as sam_state
@@ -70,10 +72,15 @@ def validate_spawn_inputs(args, config, harness=None):
     if not model:
         raise ValueError("no model configured")
 
+    if sam_plat.is_reserved_name(name):
+        raise ValueError(f"name {name!r} is a reserved device name on Windows")
     if args.cwd:
         cwd = Path(args.cwd).expanduser().resolve()
+        if sam_util.is_temp_path(cwd):
+            print(f"sam: warning: --cwd {cwd} is inside a temp directory and may be "
+                  f"wiped on reboot", file=sys.stderr)
     else:
-        cwd = task.parent.resolve()
+        cwd = sam_util.default_workspace(name, task)
     if not cwd.is_dir():
         raise NotADirectoryError(f"cwd is not a directory: {cwd}")
 
@@ -119,10 +126,9 @@ def run(args):
             return _emit_error(2, str(e), as_json)
         thinking = getattr(args, "thinking", None)
         effort = getattr(args, "effort", None)
-        if harness == "agy" and thinking:
-            return _emit_error(2, "--thinking cannot be used with --harness agy; use --effort", as_json)
-        if effort and harness != "agy":
-            return _emit_error(2, "--effort requires --harness agy", as_json)
+        reason_err = sam_harness.reasoning_error(harness, thinking, effort)
+        if reason_err:
+            return _emit_error(2, reason_err, as_json)
         inputs = validate_spawn_inputs(args, config, harness)
         depth = check_depth(config)
 
@@ -211,6 +217,7 @@ def run(args):
                         "root_id": root_id, "depth": depth,
                         "run_id": run_id, "model": model,
                         "harness": harness,
+                        "host": sam_plat.hostname(),
                         "thinking": thinking, "effort": effort,
                         "state": "spawning", "pid": None, "pgid": None,
                         "pid_start_time": None,
@@ -245,36 +252,21 @@ def run(args):
             dest_task = Path(paths["task_path"])
             sam_util.snapshot_task_file(task_path, dest_task)
 
-            # Find and validate wrapper
-            wrapper = sam_config.wrapper_path(harness=harness)
+            # Find and validate wrapper (legacy script) or the generic runner
+            wrapper = sam_config.launcher_path(harness)
             if not wrapper.is_file():
                 return _emit_error(1, "wrapper not installed; run sam init first", as_json)
-            if wrapper.resolve().name not in ("pi-wrapper", "agy-wrapper"):
+            if not sam_config.launcher_allowed(wrapper):
                 return _emit_error(1, "allowlist validation failed", as_json)
 
-            argv = [
-                str(wrapper),
-                "--agent-id", agent_id,
-                "--model", model,
-                "--session", paths["session_path"],
-                "--task", paths["task_path"],
-                "--result", paths["result_path"],
-            ]
-            if harness == "agy":
-                if effort:
-                    argv.extend(["--effort", effort])
-            elif thinking:
-                argv.extend(["--thinking", thinking])
+            argv = sam_harness.get_harness(harness).build_argv(
+                wrapper, agent_id, model, paths["session_path"],
+                paths["task_path"], paths["result_path"],
+                thinking=thinking, effort=effort)
+            argv = sam_util.launcher_argv(argv, harness)
 
-            env = build_child_env(agent_id, model, depth)
-            proc = subprocess.Popen(
-                argv, cwd=cwd, env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
+            env = build_child_env(agent_id, model, depth, harness=harness)
+            proc = sam_util.popen_detached(argv, cwd, env)
 
             sam_proc.record_launch(
                 agent_id=agent_id,
