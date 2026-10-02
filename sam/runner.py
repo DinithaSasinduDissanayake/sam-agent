@@ -523,7 +523,7 @@ def main(argv=None):
     rc = finish(final, exit_code,
                 error="; ".join(errors)[:2000] if errors else None,
                 error_kind=error_kind, code=code, **extra)
-    if watchdog and not plat.IS_WINDOWS:
+    if watchdog and not plat.IS_WINDOWS and os.getpgrp() == os.getpid():
         # Take down anything the harness left in our process group.
         try:
             os.killpg(os.getpgrp(), signal.SIGKILL)

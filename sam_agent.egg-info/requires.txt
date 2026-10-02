@@ -1,4 +1,7 @@
 
+[:sys_platform == "win32"]
+psutil>=5.9
+
 [dev]
 pytest>=7.0
 pytest-timeout>=2.0
