@@ -19,6 +19,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -27,7 +28,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "Topic :: System :: Process Management",
 ]
-dependencies = []
+dependencies = ["psutil>=5.9; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 dev = [

@@ -5,9 +5,16 @@ from pathlib import Path
 import signal
 import subprocess
 import time
+import sys
 import uuid
 
 import pytest
+
+IS_WINDOWS = sys.platform == "win32"
+if IS_WINDOWS:
+    # The legacy suite needs POSIX (shebang fake executables, /proc, signals).
+    # On Windows only tests/xplat/ is collected.
+    collect_ignore_glob = ["test_*.py"]
 
 
 @pytest.fixture(autouse=True)
@@ -15,9 +22,21 @@ def isolated_process_lifecycle(tmp_path, monkeypatch):
     home = tmp_path / "isolated-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Legacy tests expect the agent to work in the task file's directory.
+    monkeypatch.setenv("SAM_WORKSPACE_MODE", "task-dir")
+    if IS_WINDOWS:
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("SAM_HOME", str(home / ".sam"))
+        for key in ("SAM_MODEL", "SAM_HARNESS", "SAM_AGENT_ID", "SAM_DEPTH",
+                    "SAM_PARENT_ID", "SAM_ROOT_ID", "SAM_MODEL_HARNESS",
+                    "SAM_MAX_RUNNING", "SAM_RUNNER"):
+            monkeypatch.delenv(key, raising=False)
+        yield
+        return
     monkeypatch.setenv("SAM_HOME", str(home / ".sam"))
     for key in ("SAM_MODEL", "SAM_HARNESS", "SAM_AGENT_ID", "SAM_DEPTH",
-                "SAM_PARENT_ID", "SAM_ROOT_ID", "SAM_TUI_SHOW_ARCHIVED"):
+                "SAM_PARENT_ID", "SAM_ROOT_ID", "SAM_TUI_SHOW_ARCHIVED",
+                "SAM_MODEL_HARNESS", "SAM_MAX_RUNNING", "SAM_RUNNER"):
         monkeypatch.delenv(key, raising=False)
     # Accidental unmocked workers fail locally instead of consuming live quota.
     guard = tmp_path / "guard-bin"
