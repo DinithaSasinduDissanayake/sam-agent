@@ -59,7 +59,7 @@ RESULT_FIELDS = (
 # Legacy keys wrappers keep emitting for backward compatibility.
 LEGACY_RESULT_FIELDS = ("started_at", "ended_at", "output_path", "task_path")
 
-_SENTINEL_RE = re.compile(r"^##(PI|AGY)_(BEGIN|END)_[a-f0-9]+$")
+_SENTINEL_RE = re.compile(r"^##(PI|AGY|OC|CC|CX)_(BEGIN|END)_[a-f0-9]+$")
 
 
 def build_result(agent_id, harness, exit_code=None, exit_signal=None,
@@ -411,7 +411,65 @@ class AgyHarness(Harness):
         return out
 
 
-_HARNESSES = {"pi": PiHarness(), "agy": AgyHarness()}
+class PointerHarness(AgyHarness):
+    """Runner-backed harness whose session file is a pointer holding the CLI's
+    session id (opencode, claude, codex). Same wrapper flags as agy.
+    restart = fresh session (new pointer in the run dir); resume = same pointer.
+    """
+
+    def resume_session(self, prev_session_path, new_run_dir, for_resume=False):
+        if for_resume and prev_session_path:
+            return str(prev_session_path)
+        return str(Path(new_run_dir) / "session.jsonl")
+
+    def activity(self, agent, lifecycle_state, stall_seconds=300,
+                 watch=None, max_bytes=256 * 1024, now=None, sleep_fn=None):
+        out = super().activity(agent, lifecycle_state, stall_seconds=stall_seconds,
+                               watch=watch, max_bytes=max_bytes, now=now,
+                               sleep_fn=sleep_fn)
+        out.pop("envelope", None)
+        out["session"]["harness"] = self.name
+        out["session"]["token_note"] = (
+            "%s usage is reported in result.json when the run ends." % self.name)
+        return out
+
+
+class OpencodeHarness(PointerHarness):
+    name = "opencode"
+    sentinel_tag = "OC"
+
+
+class ClaudeHarness(PointerHarness):
+    name = "claude"
+    sentinel_tag = "CC"
+
+
+class CodexHarness(PointerHarness):
+    name = "codex"
+    sentinel_tag = "CX"
+
+
+_HARNESSES = {"pi": PiHarness(), "agy": AgyHarness(), "opencode": OpencodeHarness(),
+              "claude": ClaudeHarness(), "codex": CodexHarness()}
+
+
+def uses_effort(harness):
+    """True for harnesses that take --effort (everything except pi, which takes --thinking)."""
+    return harness != "pi"
+
+
+def is_pointer_harness(harness):
+    """True when the session file is a pointer holding a session id (not pi)."""
+    return harness != "pi"
+
+
+def reasoning_error(harness, thinking, effort):
+    """Validation message for --thinking/--effort, or None when the flags fit the harness."""
+    if harness == "pi":
+        return "--effort requires --harness agy" if effort else None
+    if thinking:
+        return "--thinking cannot be used with --harness %s; use --effort" % harness
+    return None
 
 
 def resolve_harness(entry):

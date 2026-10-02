@@ -14,7 +14,10 @@ from sam import plat as sam_plat
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
-PI_DEFAULT_MODEL = "opencode/muse-spark-1.3-contributor-free"
+# pi cannot use OpenCode's free tier (403 FreeTierError outside the opencode CLI);
+# on Windows the default is a model that was verified to work there.
+PI_DEFAULT_MODEL = ("nvidia/meta/muse-glimmer-30b" if os.name == "nt"
+                    else "opencode/muse-spark-1.3-contributor-free")
 AGY_DEFAULT_MODEL = "gemini-3.8-flash-low"
 
 DEFAULT_CONFIG = {
@@ -37,6 +40,45 @@ LOCKS_DIRNAME = "locks"
 BIN_DIRNAME = "bin"
 WRAPPER_FILENAME = "pi-wrapper"
 HARNESS_WRAPPERS = {"pi": "pi-wrapper", "agy": "agy-wrapper"}
+#: Every harness SAM can launch. pi/agy have legacy wrapper scripts (used on
+#: POSIX); everything else, and every harness on Windows, runs through sam/runner.py.
+HARNESSES = ("pi", "agy", "opencode", "claude", "codex")
+#: Default models of the runner-only harnesses (config key defaults.<harness>_model).
+EXTRA_DEFAULT_MODELS = {
+    "opencode": "opencode/muse-spark-1.3-contributor-free",
+    "claude": "sonnet",
+    "codex": "default",
+}
+
+
+def runner_path() -> Path:
+    """Absolute path of the generic runner script (sam/runner.py)."""
+    return Path(__file__).resolve().parent / "runner.py"
+
+
+def uses_runner(harness: str) -> bool:
+    """True when ``harness`` is launched through sam/runner.py instead of a
+    legacy wrapper: always on Windows, always for harnesses without a legacy
+    wrapper, and for pi/agy on POSIX only when $SAM_RUNNER == "generic"."""
+    if os.name == "nt" or harness not in HARNESS_WRAPPERS:
+        return True
+    return os.environ.get("SAM_RUNNER") == "generic"
+
+
+def launcher_path(harness: str) -> Path:
+    """What spawn/resume/restart start detached: the generic runner, or the
+    legacy wrapper installed by `sam init`. (wrapper_path stays the legacy bin
+    path for pi/agy: `sam init` copies the wrapper scripts to that path.)"""
+    if uses_runner(harness):
+        return runner_path()
+    return wrapper_path(harness=harness)
+
+
+def launcher_allowed(path) -> bool:
+    """Allow-list for the executable SAM starts detached."""
+    resolved = Path(path).resolve()
+    return (resolved.name in set(HARNESS_WRAPPERS.values())
+            or resolved == runner_path())
 AGENTS_DIRNAME = "agents"
 TASKS_DIRNAME = "tasks"
 EVENTS_FILENAME = "events.log"
@@ -105,10 +147,12 @@ def locks_dir(sam_home: Path = None) -> Path:
 def wrapper_path(sam_home: Path = None, harness: str = "pi") -> Path:
     if sam_home is None:
         sam_home = get_sam_home()
-    if harness not in HARNESS_WRAPPERS:
+    if harness not in HARNESSES:
         raise ValueError(
-            f"unknown harness {harness!r}, expected one of {sorted(HARNESS_WRAPPERS)}"
+            f"unknown harness {harness!r}, expected one of {sorted(HARNESSES)}"
         )
+    if harness not in HARNESS_WRAPPERS:
+        return runner_path()  # no legacy wrapper exists
     return sam_home / BIN_DIRNAME / HARNESS_WRAPPERS[harness]
 
 
@@ -121,9 +165,9 @@ def resolve_harness(args_harness=None, config: dict = None) -> str:
     if not raw and config:
         raw = config.get("defaults", {}).get("harness")
     harness = raw or "pi"
-    if harness not in HARNESS_WRAPPERS:
+    if harness not in HARNESSES:
         raise ValueError(
-            f"unknown harness {harness!r}, expected one of {sorted(HARNESS_WRAPPERS)}"
+            f"unknown harness {harness!r}, expected one of {sorted(HARNESSES)}"
         )
     return harness
 
@@ -138,11 +182,16 @@ def resolve_model(args_model=None, harness: str = "pi", config: dict = None) -> 
     if args_model:
         return args_model
     env_model = os.environ.get("SAM_MODEL")
-    if env_model:
+    env_model_harness = os.environ.get("SAM_MODEL_HARNESS")
+    # $SAM_MODEL names the model of the harness that set it; a child that
+    # spawns a DIFFERENT harness must not inherit it.
+    if env_model and (not env_model_harness or env_model_harness == harness):
         return env_model
     defaults = config.get("defaults", {}) if config else {}
     if harness == "agy":
         return defaults.get("agy_model") or defaults.get("model") or AGY_DEFAULT_MODEL
+    if harness in EXTRA_DEFAULT_MODELS:
+        return defaults.get(harness + "_model") or EXTRA_DEFAULT_MODELS[harness]
     return defaults.get("model") or PI_DEFAULT_MODEL
 
 

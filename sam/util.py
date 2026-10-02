@@ -52,6 +52,10 @@ def build_child_env(agent_id, model, depth, harness=None):
             env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={uid_bus}"
     env["SAM_AGENT_ID"] = agent_id
     env["SAM_MODEL"] = model
+    if harness:
+        env["SAM_MODEL_HARNESS"] = harness
+    else:
+        env.pop("SAM_MODEL_HARNESS", None)
     env["SAM_DEPTH"] = str(depth + 1)
     spawner_id = os.environ.get("SAM_AGENT_ID")
     env["SAM_PARENT_ID"] = spawner_id or ""
@@ -67,8 +71,9 @@ def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
     Returns subprocess.Popen object.
     Validates wrapper basename against allowlist (pi-wrapper, agy-wrapper).
     """
+    from sam import config as sam_config
     wrapper = Path(wrapper_path).resolve()
-    if wrapper.name not in ("pi-wrapper", "agy-wrapper"):
+    if not sam_config.launcher_allowed(wrapper):
         raise ValueError(f"allowlist validation failed: {wrapper.name}")
 
     argv = [
@@ -90,16 +95,27 @@ def launch_wrapper(wrapper_path, agent_id, model, session_path, task_path,
         if thinking:
             argv.extend(["--thinking", thinking])
 
-    return subprocess.Popen(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+    return popen_detached(launcher_argv(argv, harness), cwd, env)
+
+
+def popen_detached(argv, cwd, env):
+    """Start the wrapper/runner detached. Fixes $PWD first (a harness may trust
+    an inherited $PWD over the real working directory)."""
+    from sam import plat as sam_plat
+    if "PWD" in env or sam_plat.IS_WINDOWS:
+        sam_plat.fix_child_env(env, cwd)
+    return sam_plat.popen_detached(argv, cwd, env)
+
+
+def launcher_argv(argv, harness):
+    """Turn a wrapper argv from Harness.build_argv into what is really started.
+
+    Legacy wrapper: unchanged. Generic runner: [python, runner.py, --harness H] + flags.
+    """
+    from sam import config as sam_config
+    if not sam_config.uses_runner(harness):
+        return argv
+    return [sys.executable, str(sam_config.runner_path()), "--harness", harness] + list(argv[1:])
 
 
 def now_iso():
