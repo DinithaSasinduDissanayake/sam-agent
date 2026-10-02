@@ -10,13 +10,26 @@ code (skill prose is unenforceable on nested spawners). Quota/auth
 endpoints are account-global, hence the limiter is global, not per-parent.
 """
 
-import fcntl
 import json
 import os
 import signal
 import time
 
+try:
+    import fcntl
+except ImportError:  # Windows: every fcntl use below is behind IS_WINDOWS
+    fcntl = None
+
 from sam import config as sam_config
+from sam import plat as sam_plat
+from sam.plat import IS_WINDOWS
+
+if IS_WINDOWS:
+    from sam.plat import windows as _win
+
+#: signal.SIGKILL does not exist on Windows; commands use sam_proc.SIGKILL.
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+SIGTERM = signal.SIGTERM
 
 
 def proc_alive(pid):
@@ -25,6 +38,8 @@ def proc_alive(pid):
     Line 2: If ProcessLookupError, return False.
     Line 3: If PermissionError, return True (process exists but not ours, assume alive).
     """
+    if IS_WINDOWS:
+        return _win.proc_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -45,6 +60,8 @@ def read_pid_start_time(pid):
     Line 6: Extract field 19 (0-indexed) from the split list.
     Line 7: Return int(starttime).
     """
+    if IS_WINDOWS:
+        return _win.read_pid_start_time(pid)
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             data = f.read()
@@ -86,6 +103,8 @@ def killpg(pgid, sig):
     Line 2: If ProcessLookupError, pass (group already gone).
     Line 3: If PermissionError, raise.
     """
+    if IS_WINDOWS:
+        return _win.killpg(pgid, sig)
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
@@ -104,6 +123,8 @@ def pgid_of(pid):
     Line 5: Extract field 2 (0-indexed) from the split list (pgrp).
     Line 6: Return int(pgrp).
     """
+    if IS_WINDOWS:
+        return _win.pgid_of(pid)
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             data = f.read()
@@ -128,6 +149,8 @@ def pgid_of(pid):
 
 def _pid_is_zombie(pid):
     """Return True if pid exists as a zombie (terminated, awaiting reap)."""
+    if IS_WINDOWS:
+        return _win.pid_is_zombie(pid)
     try:
         with open(f"/proc/{pid}/stat", "r") as f:
             data = f.read()
@@ -148,6 +171,8 @@ def read_proc_resource(pid):
     /proc/<pid>/io is unreadable for some processes).
     cpu_ticks = utime + stime (fields 14+15 of /proc/<pid>/stat).
     """
+    if IS_WINDOWS:
+        return _win.read_proc_resource(pid)
     if pid is None:
         return None
     try:
@@ -217,7 +242,7 @@ def save_probe_sample(agent_id, sample, sam_home=None):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(sample, f)
             f.flush()
-        os.replace(tmp, p)
+        sam_plat.replace(tmp, p)
     except Exception:
         pass
 
@@ -228,6 +253,8 @@ def sample_process_group(pid, pgid=None):
     Matches pgrp == target_pgid or session == target_sid.
     Returns dict: str(pid) -> {"starttime": int, "cpu": int, "io_read": int, "io_write": int}
     """
+    if IS_WINDOWS:
+        return _win.sample_process_group(pid, pgid)
     if pid is None and pgid is None:
         return None
     target_pgid = pgid or (pgid_of(pid) if pid else None)
@@ -482,6 +509,8 @@ def kill_process_group(pgid, sigterm_timeout=5):
     Returns True if the process group is confirmed dead, False otherwise.
     This is the shared helper used by kill, wait, and other modules.
     """
+    if IS_WINDOWS:
+        return _win.kill_process_group(pgid, sigterm_timeout)
     # Phase 1: SIGTERM
     try:
         os.killpg(pgid, signal.SIGTERM)
@@ -538,6 +567,22 @@ SLOT_WAIT_S = 45
 #: previous deferral instead of consuming slot attempts (retry-spam guard).
 DUPLICATE_WINDOW_S = 120
 
+def max_running():
+    """Running-agent cap: $SAM_MAX_RUNNING, else config defaults.max_running,
+    else MAX_RUNNING. Invalid or non-positive values fall back to MAX_RUNNING."""
+    raw = os.environ.get("SAM_MAX_RUNNING")
+    if raw is None:
+        try:
+            raw = sam_config.load_config().get("defaults", {}).get("max_running")
+        except Exception:
+            raw = None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_RUNNING
+    return value if value > 0 else MAX_RUNNING
+
+
 _SPAWN_STATE_FILE = ".spawn_state.json"
 _SPAWN_LOCK_FILE = "spawn.lock"
 
@@ -573,7 +618,7 @@ def _save_spawn_state(state):
                 os.fsync(f.fileno())
             except OSError:
                 pass
-        os.replace(tmp, path)
+        sam_plat.replace(tmp, path)
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -610,8 +655,9 @@ def count_running_agents(agents):
 
 def _slot_status(now, state, running):
     """Return (granted, retry_after_s, reason) for current conditions."""
-    if running >= MAX_RUNNING:
-        return False, SLOT_WAIT_S, f"{running} agents already running (cap {MAX_RUNNING})"
+    cap = max_running()
+    if running >= cap:
+        return False, SLOT_WAIT_S, f"{running} agents already running (cap {cap})"
     last = state.get("last_spawn")
     if isinstance(last, (int, float)):
         elapsed = now - last
@@ -630,6 +676,9 @@ def _with_spawn_state(fn, timeout_s=5.0):
     Returns (True, fn_result), or (False, None) when the lock is unusable
     (callers fail open: spacing is advisory, launches are not).
     """
+    if IS_WINDOWS:
+        return _win.with_spawn_state(fn, timeout_s, _spawn_lock_path(),
+                                     _load_spawn_state, _save_spawn_state)
     lock_path = _spawn_lock_path()
     try:
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
