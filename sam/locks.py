@@ -5,12 +5,20 @@ Spec: reviews-line-by-line.md — GLM-5.2, File: sam/locks.py
 """
 
 import contextlib
-import fcntl
 import os
 import re
 import time
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
 from sam import config as sam_config
+from sam.plat import IS_WINDOWS
+
+LOCK_EX = fcntl.LOCK_EX if fcntl else 2
+LOCK_SH = fcntl.LOCK_SH if fcntl else 1
 
 
 class LockTimeout(Exception):
@@ -32,6 +40,8 @@ def _acquire_lock(path, timeout, lock_flag):
     Line 7/8:   If InterruptedError, retry immediately.
     Line 8/9: If loop exits without acquiring, os.close(fd) and raise LockTimeout.
     """
+    if IS_WINDOWS:
+        return _acquire_lock_windows(path, timeout, lock_flag)
     fd = None
     try:
         fd = os.open(
@@ -58,6 +68,37 @@ def _acquire_lock(path, timeout, lock_flag):
     raise LockTimeout(f"Could not acquire lock within {timeout}s: {path}")
 
 
+def _acquire_lock_windows(path, timeout, lock_flag):
+    """Windows body of _acquire_lock: LockFileEx (shared or exclusive)."""
+    from sam.plat import windows as _win
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+    except OSError:
+        raise LockTimeout(f"Cannot open lock file: {path}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if _win.lock_fd(fd, exclusive=(lock_flag == LOCK_EX)):
+                return fd
+        except OSError:
+            break
+        time.sleep(0.05)
+    os.close(fd)
+    raise LockTimeout(f"Could not acquire lock within {timeout}s: {path}")
+
+
+def _release_lock(fd):
+    """Unlock (the caller closes the fd)."""
+    if IS_WINDOWS:
+        from sam.plat import windows as _win
+        try:
+            _win.unlock_fd(fd)
+        except OSError:
+            pass
+        return
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
 def name_lock(name, timeout=10):
     """
@@ -72,12 +113,12 @@ def name_lock(name, timeout=10):
         raise ValueError(f"Invalid name format: {name!r}")
 
     path = sam_config.locks_dir() / f"{name}.lock"
-    fd = _acquire_lock(path, timeout, fcntl.LOCK_EX)
+    fd = _acquire_lock(path, timeout, LOCK_EX)
 
     try:
         yield fd
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _release_lock(fd)
         os.close(fd)
 
 
@@ -94,13 +135,13 @@ def registry_lock(exclusive=True, timeout=10):
     Line 11: On exit: LOCK_UN, close fd.
     """
     path = sam_config.get_sam_home() / "registry.lock"
-    lock_flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    lock_flag = LOCK_EX if exclusive else LOCK_SH
     fd = _acquire_lock(path, timeout, lock_flag)
 
     try:
         yield fd
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _release_lock(fd)
         os.close(fd)
 
 
@@ -110,11 +151,11 @@ def retry_queue_lock(exclusive=True, timeout=10):
     Stored at $SAM_HOME/locks/retry_queue.lock.
     """
     path = sam_config.locks_dir() / "retry_queue.lock"
-    lock_flag = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    lock_flag = LOCK_EX if exclusive else LOCK_SH
     fd = _acquire_lock(path, timeout, lock_flag)
 
     try:
         yield fd
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _release_lock(fd)
         os.close(fd)
