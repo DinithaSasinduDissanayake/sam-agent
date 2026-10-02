@@ -437,3 +437,19 @@ Defaults are chosen for cost, not capability:
   OpenCode is next-stage work, not a supported SAM harness yet.
 - **Environment passthrough & isolation.** Sub-agents inherit the invoker's environment variables (including API keys), except interactive SSH session markers (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`) which are stripped to ensure headless harnesses like `agy` do not request re-login. If `DBUS_SESSION_BUS_ADDRESS` is unset and `/run/user/$UID/bus` exists, it is set (SAM only sets it when missing; it does not validate or replace it). `SSH_AUTH_SOCK` is preserved for git operations.
 - **Registry is a single JSON file.** No concurrent modification protection beyond file locking. Do not edit it manually.
+
+## Cross-platform, more harnesses, runner (v0.2)
+
+- SAM runs on Linux and native Windows with the same commands. Details: `docs/CROSS-PLATFORM.md`.
+- `--harness pi | agy | opencode | claude | codex`. pi takes `--thinking`; every other harness takes `--effort`.
+- opencode, claude and codex take the task on stdin (any length). agy takes it as one command-line argument:
+  keep agy task files under 30000 characters (put long material in a file and tell the agent to read it).
+- **A dead runner always kills its agent** (no orphans burning quota). If `sam status NAME` shows `unknown`
+  with "Runner died", nothing is running any more: continue with `sam resume NAME --task <file>`.
+- A run can end by watchdog: `error_kind` `watchdog_first_output` (no output at all; treated as an infra
+  failure and retried) or `watchdog_idle` (no output and no CPU use for an hour).
+- Without `--cwd` the agent works in the task file's directory, unless that is a temp directory: then it gets
+  the persistent `<SAM_HOME>/workspaces/<name>/`. Pass `--cwd` whenever the agent must work in a project.
+- Agents on another machine: `sam status --all --remote <ssh-host>`; every entry has a `host` field.
+- More than 4 agents at once: set `defaults.max_running` in `~/.sam/config.json` (or `SAM_MAX_RUNNING`).
+  A full slot is exit code 6 with a "wait N s and re-run" message: it is not an error.

@@ -3,7 +3,7 @@
 SAM lets any harness or human spawn, track, resume, and restart scoped background pi/agy workers.
 Prevents orphaned processes, lost PIDs, and unreliable `nohup` + `&` workflows.
 
-**Linux only. Python 3.9+; core is stdlib-only, zero dependencies** (the optional `sam-tui` dashboard needs `rich`).
+**Linux and Windows. Python 3.9+; core is stdlib-only on Linux, plus `psutil` on Windows** (the optional `sam-tui` dashboard needs `rich` and is Linux-only). See `docs/CROSS-PLATFORM.md`.
 
 > **Are you an AI agent? Stop reading this and read [`SKILL.md`](SKILL.md) instead.**
 
@@ -83,7 +83,7 @@ is needed to inspect or manage SAM workers.
 
 ## Limitations (v0.1)
 
-- Linux only. Relies on `/proc/<pid>/stat`, `fcntl.flock`, `os.killpg`.
+- Linux uses `/proc/<pid>/stat`, `fcntl.flock`, `os.killpg`; Windows uses process create times, `LockFileEx` and Job Objects (`sam/plat/`).
 - No daemon mode. Agents run as background processes. Orphans possible if parent crashes.
 - No automatic recovery. A worker that misses its 30s launch window resolves `failed`; manual `sam status` and `sam restart` required.
 - No SAM execution timeout: agy explicitly uses `--print-timeout 0s`. `sam wait --timeout 0` (the default) waits indefinitely; a nonzero `--timeout` is deprecated and detaches without touching the worker; termination-on-expiry requires the explicit `--kill-after N`.
